@@ -1,0 +1,59 @@
+# Python 虚拟环境
+venv/
+.venv/
+env/
+.env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# 测试文件
+test_*.py
+tests/
+*_test.py
+
+# 文档
+docs/
+*.md
+!README.md
+
+# 本地上传文件
+uploads/
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# 本地配置
+.env.local
+.env.development
+.env.test
+
+# Alembic 迁移（如果不需要）
+# alembic/
+
+# 其他不需要的文件
+reproduce_download.py
+check_frontend_connection.sh
+grant_permissions.sql
+

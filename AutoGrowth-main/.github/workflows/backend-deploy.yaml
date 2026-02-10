@@ -1,0 +1,650 @@
+name: Backend Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'infra/**'
+      - '.github/workflows/backend-deploy.yaml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+
+env:
+  PROJECT_ID: fleet-blend-469520-n7
+  REGION: us-central1
+  ARTIFACT_REGISTRY_REPO: autogrowth-docker
+  SERVICE_NAME: autogrowth-backend
+  CLOUD_SQL_CONN_NAME: fleet-blend-469520-n7:us-central1:yvideo-factory-db-prod
+  SERVICE_ACCOUNT: sa-run-prod@fleet-blend-469520-n7.iam.gserviceaccount.com
+  TRANSFER_JOB_NAME: gdrive-transfer-worker
+  PROCESSOR_JOB_NAME: drama-processor-job
+  ZIP_JOB_NAME: zip-compress-worker
+  FISSION_JOB_NAME: fission-worker
+
+jobs:
+  deploy:
+    name: Build and Deploy Backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify GitHub Secrets
+        run: |
+          echo "🔍 Checking required GitHub Secrets..."
+          echo ""
+          
+          # Check GCP_SA_KEY (deployment service account)
+          if [ -z "${{ secrets.GCP_SA_KEY }}" ]; then
+            echo "❌ ERROR: GCP_SA_KEY secret is not set or empty"
+            echo ""
+            echo "Please configure GCP_SA_KEY in GitHub Secrets:"
+            echo "1. Go to: https://github.com/lijiannan828-oss/AutoGrowth/settings/secrets/actions"
+            echo "2. Click 'New repository secret'"
+            echo "3. Name: GCP_SA_KEY"
+            echo "4. Value: Your GCP service account JSON key (full content)"
+            echo ""
+            exit 1
+          else
+            SECRET_LENGTH=${#GCP_SA_KEY}
+            echo "✅ GCP_SA_KEY secret exists (length: ${SECRET_LENGTH} characters)"
+            # Basic JSON validation (check for key fields)
+            if echo "${{ secrets.GCP_SA_KEY }}" | grep -q '"type".*"service_account"'; then
+              echo "✅ GCP_SA_KEY appears to be valid service account JSON"
+            else
+              echo "⚠️  WARNING: GCP_SA_KEY may not be valid service account JSON"
+            fi
+          fi
+          
+          echo ""
+          
+          # Check GCP_SA_KEY_RUN_PROD (runtime service account)
+          if [ -z "${{ secrets.GCP_SA_KEY_RUN_PROD }}" ]; then
+            echo "⚠️  WARNING: GCP_SA_KEY_RUN_PROD secret is not set"
+            echo "   This is required for generating signed URLs in Cloud Run"
+            echo "   Please configure GCP_SA_KEY_RUN_PROD in GitHub Secrets"
+          else
+            SECRET_LENGTH=${#GCP_SA_KEY_RUN_PROD}
+            echo "✅ GCP_SA_KEY_RUN_PROD secret exists (length: ${SECRET_LENGTH} characters)"
+            if echo "${{ secrets.GCP_SA_KEY_RUN_PROD }}" | grep -q '"type".*"service_account"'; then
+              echo "✅ GCP_SA_KEY_RUN_PROD appears to be valid service account JSON"
+            else
+              echo "⚠️  WARNING: GCP_SA_KEY_RUN_PROD may not be valid service account JSON"
+            fi
+          fi
+          
+          echo ""
+          
+          # Check POSTGRES_PASSWORD
+          if [ -z "${{ secrets.POSTGRES_PASSWORD }}" ]; then
+            echo "⚠️  WARNING: POSTGRES_PASSWORD secret is not set"
+            echo "   This may cause deployment to fail if database password is required"
+          else
+            echo "✅ POSTGRES_PASSWORD secret exists"
+          fi
+          
+          echo ""
+          echo "✅ All required secrets verified"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Ensure Firestore API enabled
+        run: |
+          echo "Ensuring Firestore (Datastore) API is enabled..."
+          gcloud services enable firestore.googleapis.com --project=${PROJECT_ID} || echo "Firestore API may already be enabled"
+          echo "✅ Firestore API enabled"
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+      - name: Create Artifact Registry repository (if not exists)
+        run: |
+          if gcloud artifacts repositories describe ${ARTIFACT_REGISTRY_REPO} \
+            --location=${REGION} \
+            --project=${PROJECT_ID} > /dev/null 2>&1; then
+            echo "✅ Artifact Registry repository '${ARTIFACT_REGISTRY_REPO}' already exists"
+          else
+            echo "Creating Artifact Registry repository '${ARTIFACT_REGISTRY_REPO}'..."
+            gcloud artifacts repositories create ${ARTIFACT_REGISTRY_REPO} \
+              --repository-format=docker \
+              --location=${REGION} \
+              --description="Docker repository for AutoGrowth backend" \
+              --project=${PROJECT_ID}
+          fi
+
+      - name: Build Docker image
+        working-directory: ./backend
+        run: |
+          docker build -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+                       -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:latest .
+
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA}
+          docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:latest
+
+      - name: Prepare service account key files
+        run: |
+          # Deployment service account key (for CI/CD operations)
+          echo "${{ secrets.GCP_SA_KEY }}" > /tmp/service-account.json
+          chmod 600 /tmp/service-account.json
+          
+          # Runtime service account key (for Cloud Run signed URL generation)
+          if [ -n "${{ secrets.GCP_SA_KEY_RUN_PROD }}" ]; then
+            echo "${{ secrets.GCP_SA_KEY_RUN_PROD }}" > /tmp/service-account-run-prod.json
+            chmod 600 /tmp/service-account-run-prod.json
+            echo "✅ Runtime service account key file prepared"
+          else
+            echo "⚠️  WARNING: GCP_SA_KEY_RUN_PROD not set, skipping runtime key file"
+          fi
+
+      - name: Enable Secret Manager API
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          echo "Enabling Secret Manager API..."
+          gcloud services enable secretmanager.googleapis.com --project=${PROJECT_ID} || echo "API may already be enabled"
+          echo "✅ Secret Manager API enabled"
+
+      - name: Create or verify secrets in Secret Manager
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          # Check and create postgres-password secret only if it doesn't exist
+          if ! gcloud secrets describe postgres-password --project=${PROJECT_ID} > /dev/null 2>&1; then
+            echo "Creating postgres-password secret..."
+            echo -n "${{ secrets.POSTGRES_PASSWORD }}" | gcloud secrets create postgres-password \
+              --data-file=- \
+              --project=${PROJECT_ID}
+          else
+            echo "postgres-password secret already exists, skipping creation"
+          fi
+          
+          # Check and create gcp-sa-key secret (deployment service account) only if it doesn't exist
+          if ! gcloud secrets describe gcp-sa-key --project=${PROJECT_ID} > /dev/null 2>&1; then
+            echo "Creating gcp-sa-key secret (deployment service account)..."
+            gcloud secrets create gcp-sa-key \
+              --data-file=/tmp/service-account.json \
+              --project=${PROJECT_ID}
+          else
+            echo "gcp-sa-key secret already exists, skipping creation"
+          fi
+          
+          # Check and create sa-run-prod-key secret (runtime service account) only if it doesn't exist
+          if [ -f /tmp/service-account-run-prod.json ]; then
+            if ! gcloud secrets describe sa-run-prod-key --project=${PROJECT_ID} > /dev/null 2>&1; then
+              echo "Creating sa-run-prod-key secret (runtime service account)..."
+              gcloud secrets create sa-run-prod-key \
+                --data-file=/tmp/service-account-run-prod.json \
+                --project=${PROJECT_ID}
+              echo "✅ sa-run-prod-key secret created"
+              # Immediately grant access after creation
+              echo "Granting access to sa-run-prod-key immediately after creation..."
+              gcloud secrets add-iam-policy-binding sa-run-prod-key \
+                --member="serviceAccount:${SERVICE_ACCOUNT}" \
+                --role="roles/secretmanager.secretAccessor" \
+                --project=${PROJECT_ID}
+              echo "✅ sa-run-prod-key access granted immediately after creation"
+            else
+              echo "sa-run-prod-key secret already exists, updating with latest version..."
+              gcloud secrets versions add sa-run-prod-key \
+                --data-file=/tmp/service-account-run-prod.json \
+                --project=${PROJECT_ID}
+              echo "✅ sa-run-prod-key secret updated"
+              # Ensure access is granted after update
+              echo "Ensuring access is granted after update..."
+              gcloud secrets add-iam-policy-binding sa-run-prod-key \
+                --member="serviceAccount:${SERVICE_ACCOUNT}" \
+                --role="roles/secretmanager.secretAccessor" \
+                --project=${PROJECT_ID} 2>&1 && echo "✅ sa-run-prod-key access granted after update" || echo "⚠️  Access grant may have failed, will check in next step"
+            fi
+          else
+            echo "⚠️  WARNING: Runtime service account key file not found, skipping sa-run-prod-key secret creation"
+          fi
+          
+          # Grant runtime service account access to secrets (idempotent operation)
+          echo "Ensuring runtime service account has access to secrets..."
+          echo "Granting access to postgres-password..."
+          gcloud secrets add-iam-policy-binding postgres-password \
+            --member="serviceAccount:${SERVICE_ACCOUNT}" \
+            --role="roles/secretmanager.secretAccessor" \
+            --project=${PROJECT_ID} 2>&1 && echo "✅ postgres-password access granted" || echo "ℹ️  postgres-password access already granted or failed"
+          
+          echo "Granting access to gcp-sa-key..."
+          gcloud secrets add-iam-policy-binding gcp-sa-key \
+            --member="serviceAccount:${SERVICE_ACCOUNT}" \
+            --role="roles/secretmanager.secretAccessor" \
+            --project=${PROJECT_ID} 2>&1 && echo "✅ gcp-sa-key access granted" || echo "ℹ️  gcp-sa-key access already granted or failed"
+          
+          # Always grant access to sa-run-prod-key if secret exists (even if file doesn't exist, secret might have been created before)
+          # This is critical - we must ensure access is granted before deployment
+          if gcloud secrets describe sa-run-prod-key --project=${PROJECT_ID} > /dev/null 2>&1; then
+            echo "sa-run-prod-key secret exists, ensuring access is granted..."
+            
+            # First, check current policy
+            POLICY_CHECK=$(gcloud secrets get-iam-policy sa-run-prod-key --project=${PROJECT_ID} --format="table(bindings.members,bindings.role)" 2>&1)
+            POLICY_CHECK_EXIT=$?
+            
+            if [ ${POLICY_CHECK_EXIT} -eq 0 ]; then
+              if echo "${POLICY_CHECK}" | grep -q "${SERVICE_ACCOUNT}"; then
+                echo "✅ sa-run-prod-key access already exists"
+              else
+                echo "❌ sa-run-prod-key access is missing, granting now..."
+                echo "Current policy:"
+                echo "${POLICY_CHECK}"
+                GRANT_OUTPUT=$(gcloud secrets add-iam-policy-binding sa-run-prod-key \
+                  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+                  --role="roles/secretmanager.secretAccessor" \
+                  --project=${PROJECT_ID} 2>&1)
+                GRANT_EXIT_CODE=$?
+                
+                if [ ${GRANT_EXIT_CODE} -eq 0 ]; then
+                  echo "✅ sa-run-prod-key access granted successfully"
+                else
+                  echo "❌ ERROR: Failed to grant access to sa-run-prod-key"
+                  echo "Output: ${GRANT_OUTPUT}"
+                  echo ""
+                  echo "This will cause deployment to fail. Please check:"
+                  echo "1. Deployment service account has roles/secretmanager.admin"
+                  echo "2. Secret sa-run-prod-key exists"
+                  echo "3. Service account ${SERVICE_ACCOUNT} is correct"
+                  exit 1
+                fi
+              fi
+            else
+              echo "⚠️  Warning: Could not check current policy (exit code: ${POLICY_CHECK_EXIT})"
+              echo "Attempting to grant access anyway..."
+              GRANT_OUTPUT=$(gcloud secrets add-iam-policy-binding sa-run-prod-key \
+                --member="serviceAccount:${SERVICE_ACCOUNT}" \
+                --role="roles/secretmanager.secretAccessor" \
+                --project=${PROJECT_ID} 2>&1)
+              GRANT_EXIT_CODE=$?
+              
+              if [ ${GRANT_EXIT_CODE} -eq 0 ]; then
+                echo "✅ sa-run-prod-key access granted"
+              else
+                echo "❌ ERROR: Failed to grant access (exit code: ${GRANT_EXIT_CODE})"
+                echo "Output: ${GRANT_OUTPUT}"
+                exit 1
+              fi
+            fi
+          elif [ -f /tmp/service-account-run-prod.json ]; then
+            echo "⚠️  WARNING: sa-run-prod-key secret does not exist, but key file is available"
+            echo "Secret should have been created above. This may indicate a problem."
+          fi
+
+      - name: Prepare environment variables file
+        env:
+          PIPELINE_GDRIVE_ROOTS: ${{ secrets.PIPELINE_GDRIVE_ROOTS }}
+          PIPELINE_DEFAULT_TOKEN_REF: ${{ secrets.PIPELINE_DEFAULT_TOKEN_REF }}
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REDIRECT_URI: ${{ secrets.GOOGLE_OAUTH_REDIRECT_URI }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+          ALLOWED_EMAIL_DOMAINS: ${{ secrets.ALLOWED_EMAIL_DOMAINS }}
+          OAUTH_TOKEN_ENCRYPTION_KEY: ${{ secrets.OAUTH_TOKEN_ENCRYPTION_KEY }}
+        run: |
+          PIPELINE_GDRIVE_ROOTS_VALUE="$(echo "${PIPELINE_GDRIVE_ROOTS}" | tr -d '\n')"
+          PIPELINE_DEFAULT_TOKEN_REF_VALUE="$(echo "${PIPELINE_DEFAULT_TOKEN_REF}" | tr -d '\n')"
+          GOOGLE_OAUTH_CLIENT_ID_VALUE="$(echo "${GOOGLE_OAUTH_CLIENT_ID}" | tr -d '\n')"
+          GOOGLE_OAUTH_CLIENT_SECRET_VALUE="$(echo "${GOOGLE_OAUTH_CLIENT_SECRET}" | tr -d '\n')"
+          GOOGLE_OAUTH_REDIRECT_URI_VALUE="$(echo "${GOOGLE_OAUTH_REDIRECT_URI}" | tr -d '\n')"
+          GOOGLE_SHEETS_ID_VALUE="$(echo "${GOOGLE_SHEETS_ID}" | tr -d '\n')"
+          ALLOWED_EMAIL_DOMAINS_VALUE="$(echo "${ALLOWED_EMAIL_DOMAINS}" | tr -d '\n')"
+          OAUTH_TOKEN_ENCRYPTION_KEY_VALUE="$(echo "${OAUTH_TOKEN_ENCRYPTION_KEY}" | tr -d '\n')"
+
+          cat <<ENV > /tmp/backend-env.yaml
+          APP_ENV: "production"
+          LOG_LEVEL: "INFO"
+          DATABASE_NAME: "auto_growth"
+          DATABASE_USER: "appdev"
+          USE_IAM_AUTH: "false"
+          FRONTEND_ORIGINS: "https://autogrowth-477909.web.app"
+          FIREBASE_PROJECT_ID: "fleet-blend-469520-n7"
+          FIRESTORE_PROJECT_ID: "fleet-blend-469520-n7"
+          FIRESTORE_NAMESPACE: "short-drama-resource"
+          PIPELINE_GCS_SOURCE_BUCKET: "vigloo_source"
+          CLOUD_SQL_CONNECTION_NAME: "${CLOUD_SQL_CONN_NAME}"
+          GOOGLE_SHEETS_ID: "${GOOGLE_SHEETS_ID_VALUE}"
+          ALLOWED_EMAIL_DOMAINS: "${ALLOWED_EMAIL_DOMAINS_VALUE}"
+          OAUTH_TOKEN_ENCRYPTION_KEY: "${OAUTH_TOKEN_ENCRYPTION_KEY_VALUE}"
+          GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID_VALUE}"
+          GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET_VALUE}"
+          GOOGLE_OAUTH_REDIRECT_URI: "${GOOGLE_OAUTH_REDIRECT_URI_VALUE}"
+          PIPELINE_GDRIVE_ROOTS: "${PIPELINE_GDRIVE_ROOTS_VALUE}"
+          PIPELINE_DEFAULT_TOKEN_REF: "${PIPELINE_DEFAULT_TOKEN_REF_VALUE}"
+          TRANSFER_JOB_NAME: "projects/${PROJECT_ID}/locations/${REGION}/jobs/${TRANSFER_JOB_NAME}"
+          PROCESSOR_JOB_NAME: "projects/${PROJECT_ID}/locations/${REGION}/jobs/${PROCESSOR_JOB_NAME}"
+          ZIP_JOB_NAME: "projects/${PROJECT_ID}/locations/${REGION}/jobs/${ZIP_JOB_NAME}"
+          ENV
+
+      - name: Deploy Transfer Worker Job (WK001)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          gcloud run jobs deploy ${TRANSFER_JOB_NAME} \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --service-account ${SERVICE_ACCOUNT} \
+            --memory 2048Mi \
+            --cpu 2 \
+            --max-retries 3 \
+            --parallelism 5 \
+            --task-timeout 10800 \
+            --tasks 1 \
+            --command python \
+            --args=-m \
+            --args=app.workers.transfer.main \
+            --env-vars-file /tmp/backend-env.yaml \
+            --project ${PROJECT_ID}
+
+      - name: Deploy Processor Worker Job (WK002)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          gcloud run jobs deploy ${PROCESSOR_JOB_NAME} \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --service-account ${SERVICE_ACCOUNT} \
+            --memory 4Gi \
+            --cpu 2 \
+            --max-retries 3 \
+            --parallelism 50 \
+            --task-timeout 10800 \
+            --tasks 1 \
+            --command python \
+            --args=-m \
+            --args=app.workers.process.main \
+            --env-vars-file /tmp/backend-env.yaml \
+            --project ${PROJECT_ID}
+
+      - name: Deploy ZIP Worker Job (WK003)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          gcloud run jobs deploy ${ZIP_JOB_NAME} \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --service-account ${SERVICE_ACCOUNT} \
+            --memory 2048Mi \
+            --cpu 2 \
+            --max-retries 3 \
+            --parallelism 5 \
+            --task-timeout 3600 \
+            --tasks 1 \
+            --command python \
+            --args=-m \
+            --args=app.workers.zip_compress.main \
+            --env-vars-file /tmp/backend-env.yaml \
+            --project ${PROJECT_ID}
+
+      - name: Deploy Fission Worker Job (WK004)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          gcloud run jobs deploy ${FISSION_JOB_NAME} \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --service-account ${SERVICE_ACCOUNT} \
+            --memory 4096Mi \
+            --cpu 2 \
+            --max-retries 3 \
+            --parallelism 10 \
+            --task-timeout 3600 \
+            --tasks 1 \
+            --command python \
+            --args=-m \
+            --args=app.workers.fission.main \
+            --env-vars-file /tmp/backend-env.yaml \
+            --project ${PROJECT_ID}
+
+      - name: Deploy Relay Service (Eventarc intermediary)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          gcloud run deploy drama-processor-relay-service \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --platform managed \
+            --allow-unauthenticated \
+            --service-account ${SERVICE_ACCOUNT} \
+            --port 8080 \
+            --memory 1Gi \
+            --cpu 1 \
+            --timeout 300 \
+            --cpu-boost \
+            --env-vars-file /tmp/backend-env.yaml \
+            --set-secrets "DATABASE_PASSWORD=postgres-password:latest,/secrets/sa-run-prod-key=sa-run-prod-key:latest" \
+            --add-cloudsql-instances ${CLOUD_SQL_CONN_NAME} \
+            --project ${PROJECT_ID}
+
+      - name: Verify and grant sa-run-prod-key secret access before deployment
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          echo "=========================================="
+          echo "Verifying sa-run-prod-key secret access before deployment..."
+          echo "Service account: ${SERVICE_ACCOUNT}"
+          echo "Project: ${PROJECT_ID}"
+          echo "=========================================="
+          
+          if gcloud secrets describe sa-run-prod-key --project=${PROJECT_ID} > /dev/null 2>&1; then
+            echo "✅ sa-run-prod-key secret exists"
+            echo ""
+            echo "Checking current IAM policy..."
+            POLICY_CHECK=$(gcloud secrets get-iam-policy sa-run-prod-key --project=${PROJECT_ID} --format="table(bindings.members,bindings.role)" 2>&1)
+            POLICY_EXIT=$?
+            
+            if [ ${POLICY_EXIT} -eq 0 ]; then
+              echo "Current policy:"
+              echo "${POLICY_CHECK}"
+              echo ""
+              
+              if echo "${POLICY_CHECK}" | grep -q "${SERVICE_ACCOUNT}"; then
+                echo "✅ sa-run-prod-key access confirmed for ${SERVICE_ACCOUNT}"
+              else
+                echo "❌ ERROR: sa-run-prod-key access is MISSING for ${SERVICE_ACCOUNT}!"
+                echo ""
+                echo "Granting access now..."
+                GRANT_OUTPUT=$(gcloud secrets add-iam-policy-binding sa-run-prod-key \
+                  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+                  --role="roles/secretmanager.secretAccessor" \
+                  --project=${PROJECT_ID} 2>&1)
+                GRANT_EXIT=$?
+                
+                if [ ${GRANT_EXIT} -eq 0 ]; then
+                  echo "✅ sa-run-prod-key access granted successfully"
+                  echo "Verifying access was granted..."
+                  sleep 2
+                  VERIFY_CHECK=$(gcloud secrets get-iam-policy sa-run-prod-key --project=${PROJECT_ID} --format="table(bindings.members,bindings.role)" 2>&1)
+                  if echo "${VERIFY_CHECK}" | grep -q "${SERVICE_ACCOUNT}"; then
+                    echo "✅ Access verified - deployment can proceed"
+                  else
+                    echo "⚠️  WARNING: Access may not be fully propagated yet"
+                  fi
+                else
+                  echo "❌ ERROR: Failed to grant access to sa-run-prod-key"
+                  echo "Exit code: ${GRANT_EXIT}"
+                  echo "Output: ${GRANT_OUTPUT}"
+                  echo ""
+                  echo "This will cause deployment to fail!"
+                  exit 1
+                fi
+              fi
+            else
+              echo "❌ ERROR: Could not check IAM policy (exit code: ${POLICY_EXIT})"
+              echo "Output: ${POLICY_CHECK}"
+              echo ""
+              echo "Attempting to grant access anyway..."
+              gcloud secrets add-iam-policy-binding sa-run-prod-key \
+                --member="serviceAccount:${SERVICE_ACCOUNT}" \
+                --role="roles/secretmanager.secretAccessor" \
+                --project=${PROJECT_ID}
+              if [ $? -ne 0 ]; then
+                echo "❌ ERROR: Failed to grant access"
+                exit 1
+              fi
+            fi
+          else
+            echo "⚠️  WARNING: sa-run-prod-key secret does not exist"
+            echo "This is OK if it will be created during deployment"
+            echo "But if it exists in deployment, this may cause issues"
+          fi
+          echo "=========================================="
+
+      - name: Pre-remove secret binding for GOOGLE_APPLICATION_CREDENTIALS (if exists)
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          echo "Attempting to remove existing secret binding for GOOGLE_APPLICATION_CREDENTIALS (if any)..."
+          set +e
+          gcloud run services update ${SERVICE_NAME} \
+            --region ${REGION} \
+            --project ${PROJECT_ID} \
+            --remove-secrets GOOGLE_APPLICATION_CREDENTIALS
+          EXIT_CODE=$?
+          set -e
+          if [ ${EXIT_CODE} -eq 0 ]; then
+            echo "✅ Removed existing secret binding for GOOGLE_APPLICATION_CREDENTIALS (or none existed)."
+          else
+            echo "ℹ️  Could not remove secret binding (possibly none existed). Continuing..."
+          fi
+
+      - name: Deploy to Cloud Run
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          PIPELINE_GDRIVE_ROOTS_VALUE="$(echo "${{ secrets.PIPELINE_GDRIVE_ROOTS }}" | tr -d '\n')"
+          PIPELINE_DEFAULT_TOKEN_REF_VALUE="$(echo "${{ secrets.PIPELINE_DEFAULT_TOKEN_REF }}" | tr -d '\n')"
+          GOOGLE_OAUTH_CLIENT_ID_VALUE="$(echo "${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}" | tr -d '\n')"
+          GOOGLE_OAUTH_CLIENT_SECRET_VALUE="$(echo "${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}" | tr -d '\n')"
+          GOOGLE_OAUTH_REDIRECT_URI_VALUE="$(echo "${{ secrets.GOOGLE_OAUTH_REDIRECT_URI }}" | tr -d '\n')"
+          GOOGLE_SHEETS_ID_VALUE="$(echo "${{ secrets.GOOGLE_SHEETS_ID || '' }}" | tr -d '\n')"
+          OAUTH_TOKEN_ENCRYPTION_KEY_VALUE="$(echo "${{ secrets.OAUTH_TOKEN_ENCRYPTION_KEY }}" | tr -d '\n')"
+
+          cat <<ENV > /tmp/backend-env.yaml
+          APP_ENV: "production"
+          LOG_LEVEL: "INFO"
+          DATABASE_NAME: "auto_growth"
+          DATABASE_USER: "appdev"
+          USE_IAM_AUTH: "false"
+          FRONTEND_ORIGINS: "https://autogrowth-477909.web.app"
+          FIREBASE_PROJECT_ID: "fleet-blend-469520-n7"
+          FIRESTORE_PROJECT_ID: "fleet-blend-469520-n7"
+          FIRESTORE_NAMESPACE: "short-drama-resource"
+          GCP_PROJECT_ID: "fleet-blend-469520-n7"
+          FISSION_BUCKET: "vigloo_source"
+          FISSION_UPLOAD_BUCKET: "vigloo-fission-uploads"
+          PIPELINE_GCS_SOURCE_BUCKET: "vigloo_source"
+          CLOUD_SQL_CONNECTION_NAME: "${CLOUD_SQL_CONN_NAME}"
+          GOOGLE_APPLICATION_CREDENTIALS: "/secrets/sa-run-prod-key"
+          GOOGLE_SHEETS_ID: "${GOOGLE_SHEETS_ID_VALUE}"
+          OAUTH_TOKEN_ENCRYPTION_KEY: "${OAUTH_TOKEN_ENCRYPTION_KEY_VALUE}"
+          ALLOWED_EMAIL_DOMAINS: "${{ secrets.ALLOWED_EMAIL_DOMAINS }}"
+          GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID_VALUE}"
+          GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET_VALUE}"
+          GOOGLE_OAUTH_REDIRECT_URI: "${GOOGLE_OAUTH_REDIRECT_URI_VALUE}"
+          PIPELINE_GDRIVE_ROOTS: "${PIPELINE_GDRIVE_ROOTS_VALUE}"
+          PIPELINE_DEFAULT_TOKEN_REF: "${PIPELINE_DEFAULT_TOKEN_REF_VALUE}"
+          TRANSFER_JOB_NAME: "projects/${PROJECT_ID}/locations/${REGION}/jobs/${TRANSFER_JOB_NAME}"
+          PROCESSOR_JOB_NAME: "projects/${PROJECT_ID}/locations/${REGION}/jobs/${PROCESSOR_JOB_NAME}"
+          ZIP_JOB_NAME: "projects/${PROJECT_ID}/locations/${REGION}/jobs/${ZIP_JOB_NAME}"
+          ENV
+
+          gcloud run deploy ${SERVICE_NAME} \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --platform managed \
+            --allow-unauthenticated \
+            --service-account ${SERVICE_ACCOUNT} \
+            --port 8080 \
+            --memory 512Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 10 \
+            --timeout 3600 \
+            --concurrency 80 \
+            --env-vars-file /tmp/backend-env.yaml \
+            --set-secrets "DATABASE_PASSWORD=postgres-password:latest,/secrets/sa-run-prod-key=sa-run-prod-key:latest" \
+            --no-cpu-throttling \
+            --add-cloudsql-instances ${CLOUD_SQL_CONN_NAME} \
+            --project ${PROJECT_ID}
+
+      - name: Get Cloud Run service URL
+        id: service-url
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+            --region ${REGION} \
+            --format 'value(status.url)' \
+            --project ${PROJECT_ID})
+          echo "url=${SERVICE_URL}" >> $GITHUB_OUTPUT
+          echo "✅ Service deployed at: ${SERVICE_URL}"
+
+      - name: Health check
+        run: |
+          sleep 10
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+            --region ${REGION} \
+            --format 'value(status.url)' \
+            --project ${PROJECT_ID})
+          curl -f ${SERVICE_URL}/health || exit 1
+          echo "✅ Health check passed"
+
+      - name: Configure GCS CORS for direct signed URL downloads
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
+        run: |
+          echo "Configuring CORS on GCS bucket: gs://vigloo_processed ..."
+          if [ ! -f infra/gcs-cors.json ]; then
+            echo "❌ CORS file not found at infra/gcs-cors.json"
+            exit 1
+          fi
+          
+          # 获取当前使用的服务账号 email
+          CURRENT_SA=$(gcloud auth list --filter=status:ACTIVE --format="value(account)" | head -1)
+          echo "Current service account: ${CURRENT_SA}"
+          
+          # 尝试设置 CORS
+          if gsutil cors set infra/gcs-cors.json gs://vigloo_processed 2>&1; then
+            echo "✅ GCS CORS configured successfully for gs://vigloo_processed"
+          else
+            echo "⚠️  Warning: Failed to set CORS automatically (likely due to missing permissions)"
+            echo ""
+            echo "Please run ONE of the following commands manually (requires project admin):"
+            echo ""
+            echo "Option 1 - Project-level Storage Admin (recommended):"
+            echo "  gcloud projects add-iam-policy-binding ${PROJECT_ID} \\"
+            echo "    --member=\"serviceAccount:${CURRENT_SA}\" \\"
+            echo "    --role=\"roles/storage.admin\""
+            echo ""
+            echo "Option 2 - Bucket-level Storage Admin:"
+            echo "  gsutil iam ch serviceAccount:${CURRENT_SA}:roles/storage.admin gs://vigloo_processed"
+            echo ""
+            echo "After granting permissions, re-run this workflow or manually configure CORS:"
+            echo "  gsutil cors set infra/gcs-cors.json gs://vigloo_processed"
+            echo ""
+            echo "⚠️  Continuing deployment without CORS configuration..."
+            echo "⚠️  Note: Direct download will not work until CORS is configured"
+          fi

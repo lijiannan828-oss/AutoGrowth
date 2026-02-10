@@ -1,0 +1,87 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+
+# Environment variables
+.env
+.env.local
+.env*.local
+
+# Service account keys
+service-account.json
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.*.json
+!firebase.json
+!infra/gcs-cors.json
+!eslint.config.mjs
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
+*.cache
+
+# Test files
+coverage/
+.nyc_output/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Cloud SQL Proxy
+cloud_sql_proxy
+
+# Documentation build
+docs/_build/
+
+# Local test files
+test_*.py
+!backend/tests/
+
+# Backend venv (explicit)
+backend/venv/
+
