@@ -431,8 +431,8 @@ class FissionWorker:
 
         total_start = time.time()
 
-        # 1. 切片（20秒/段，3倍切片数量以提高并行处理效率和生成速度）
-        segment_files = self._split_video(input_path, temp_dir, segment_duration=20)
+        # 1. 切片（1秒/段，60倍切片数量以提高并行处理效率和生成速度）
+        segment_files = self._split_video(input_path, temp_dir, segment_duration=1)
 
         if len(segment_files) == 1:
             # 不需要分片，直接处理
@@ -449,8 +449,8 @@ class FissionWorker:
             self._apply_transforms_optimized(seg_path, output_seg, video_filters, audio_filters)
             return output_seg
 
-        # 使用线程池并行处理（最多8个并行，配合更多切片提高处理速度）
-        max_workers = min(8, len(segment_files))
+        # 使用线程池并行处理（最多16个并行，配合更多切片提高处理速度）
+        max_workers = min(16, len(segment_files))
         print(f"[INFO] Processing {len(segment_files)} segments with {max_workers} workers")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
