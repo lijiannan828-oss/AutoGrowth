@@ -171,9 +171,10 @@ LOCAL_UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads" / "fis
     summary="获取GCS视频列表",
 )
 def list_videos(
+    max_results: int = Query(100, ge=1, le=500, description="最大返回数量"),
     current_user: Optional[AuthenticatedUser] = Depends(get_current_user_optional),
 ):
-    """列出GCS桶中的所有视频文件"""
+    """列出GCS桶中的视频文件（限制数量避免超时）"""
     from google.cloud import storage
     from app.core.config import settings
 
@@ -183,7 +184,8 @@ def list_videos(
         bucket = storage_client.bucket(bucket_name)
 
         videos = []
-        for blob in bucket.list_blobs():
+        # 限制列出的文件数量，避免超时
+        for blob in bucket.list_blobs(max_results=max_results * 2):
             if blob.name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
                 videos.append({
                     "name": blob.name.split('/')[-1],
@@ -191,6 +193,9 @@ def list_videos(
                     "size": blob.size,
                     "updated": blob.updated.isoformat() if blob.updated else None,
                 })
+                # 达到视频数量限制后停止
+                if len(videos) >= max_results:
+                    break
 
         return {"videos": videos}
     except Exception as e:
