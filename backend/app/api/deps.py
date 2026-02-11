@@ -1,9 +1,12 @@
 """Common API dependencies."""
 
+import logging
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 from app.core.database import get_session
@@ -31,19 +34,25 @@ async def get_db_session() -> AsyncIterator[AsyncSession]:
 def get_current_user(authorization: str | None = Header(default=None)) -> AuthenticatedUser:
     """Validate Authorization header and return authenticated user."""
     if not authorization or not authorization.lower().startswith("bearer "):
+        logger.warning("[AUTH] 401: Missing or invalid Authorization header. Got: %s", authorization[:30] if authorization else None)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing Authorization header",
         )
 
     token = authorization.split(" ", 1)[1].strip()
+    logger.info("[AUTH] Token received, length=%d, prefix=%s...", len(token), token[:20])
+    logger.info("[AUTH] app_env=%s", settings.app_env)
 
     if settings.app_env == "development" and token == DEV_AUTH_TOKEN:
+        logger.info("[AUTH] Dev token accepted")
         return DEV_USER
 
     try:
         payload = verify_firebase_token(token)
+        logger.info("[AUTH] Firebase token verified, email=%s", payload.get("email"))
     except AuthenticationError as exc:
+        logger.warning("[AUTH] 401: Firebase token verification failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
