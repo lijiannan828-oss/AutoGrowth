@@ -1,0 +1,41 @@
+# ============================================
+# Cloud Build 配置：process-worker
+# ============================================
+# 用途：构建并推送 process-worker Docker 镜像
+# 构建上下文：backend/ 目录
+# Dockerfile 位置：backend/app/workers/process/Dockerfile
+# ============================================
+
+steps:
+  # 步骤 1：构建 Docker 镜像
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/autogrowth-docker/process-worker:latest'
+      - '-f'
+      - 'app/workers/process/Dockerfile'
+      - '.'
+    id: 'build-process-worker'
+    timeout: 1200s
+
+  # 步骤 2：推送镜像到 Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/autogrowth-docker/process-worker:latest'
+    id: 'push-process-worker'
+    waitFor: ['build-process-worker']
+
+# 构建超时时间
+timeout: 1800s
+
+# 构建选项
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+
+# 镜像输出
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/autogrowth-docker/process-worker:latest'
+
