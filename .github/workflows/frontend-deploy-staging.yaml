@@ -117,4 +117,23 @@ jobs:
             --format 'value(status.url)' \
             --project ${PROJECT_ID})
           curl -f ${SERVICE_URL} || echo "⚠️ Health check failed, but continuing..."
-          echo "✅ Staging deployment completed"
+          echo "✅ Cloud Run deployment completed"
+
+      - name: Deploy Firebase Hosting (proxy to Cloud Run)
+        working-directory: ./frontend
+        run: |
+          npx --yes firebase-tools@latest deploy \
+            --only hosting:auto-growth \
+            --project ${PROJECT_ID} \
+            --non-interactive
+
+      - name: Output URLs
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+            --region ${REGION} \
+            --format 'value(status.url)' \
+            --project ${PROJECT_ID})
+          echo "✅ Deployment completed!"
+          echo "📍 Cloud Run URL: ${SERVICE_URL}"
+          echo "📍 Firebase Hosting URL: https://auto-growth.web.app"
+          echo "🔥 Use Firebase Hosting URL for production access"

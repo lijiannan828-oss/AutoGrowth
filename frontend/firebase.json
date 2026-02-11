@@ -1,8 +1,16 @@
 {
   "hosting": {
     "site": "auto-growth",
-    "source": ".",
-    "frameworksBackend": {}
+    "public": "public",
+    "rewrites": [
+      {
+        "source": "**",
+        "run": {
+          "serviceId": "autogrowth-frontend-staging",
+          "region": "us-central1"
+        }
+      }
+    ]
   }
 }
 
