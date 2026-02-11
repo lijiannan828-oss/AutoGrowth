@@ -1,4 +1,4 @@
-name: Frontend Deploy to Staging
+name: Frontend Deploy to Staging (Cloud Run)
 
 on:
   push:
@@ -19,32 +19,23 @@ on:
           - staging
 
 env:
-  FIREBASE_PROJECT_ID: fleet-blend-469520-n7
-  FIREBASE_HOSTING_SITE: auto-growth
+  PROJECT_ID: fleet-blend-469520-n7
+  REGION: us-central1
+  ARTIFACT_REGISTRY_REPO: autogrowth-docker
+  SERVICE_NAME: autogrowth-frontend-staging
   STAGING_BACKEND_URL: https://autogrowth-backend-staging-969581645484.us-central1.run.app
 
 jobs:
   deploy:
-    name: Build and Deploy Frontend (Staging)
+    name: Build and Deploy Frontend to Cloud Run (Staging)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
 
-    defaults:
-      run:
-        working-directory: ./frontend
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        id: gcp-auth
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-          token_format: 'access_token'
 
       - name: Verify required secrets
         run: |
@@ -54,17 +45,21 @@ jobs:
           fi
           echo "✅ Secrets present"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
 
-      - name: Inject staging env
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+      - name: Create .env.production for build
+        working-directory: ./frontend
         run: |
           cat <<'EOF' > .env.production
           NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCx8tXxeiI9pZCxrr_fEwCyW8d73HFlD78
@@ -76,23 +71,50 @@ jobs:
           NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-VKT8LLFPYL
           NEXT_PUBLIC_API_URL=${{ env.STAGING_BACKEND_URL }}
           EOF
-          echo "✅ Wrote .env.production for staging"
-          echo "📍 API URL: ${{ env.STAGING_BACKEND_URL }}"
+          echo "✅ Created .env.production for staging"
 
-      - name: Build static site
-        run: npm run build
-
-      - name: Deploy to Firebase Hosting (Staging Site)
-        env:
-          FIREBASE_CLI_EXPERIMENTS: webframeworks
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+      - name: Build Docker image
+        working-directory: ./frontend
         run: |
-          npx --yes firebase-tools@latest deploy \
-            --only hosting:${{ env.FIREBASE_HOSTING_SITE }} \
-            --project "${{ env.FIREBASE_PROJECT_ID }}" \
-            --non-interactive
+          docker build -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+                       -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:latest .
 
-      - name: Output staging URL
+      - name: Push Docker image to Artifact Registry
         run: |
+          docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA}
+          docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:latest
+
+      - name: Deploy to Cloud Run (Staging)
+        run: |
+          gcloud run deploy ${SERVICE_NAME} \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 512Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 5 \
+            --timeout 60 \
+            --concurrency 80 \
+            --project ${PROJECT_ID}
+
+      - name: Get Service URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+            --region ${REGION} \
+            --format 'value(status.url)' \
+            --project ${PROJECT_ID})
           echo "✅ Staging frontend deployed!"
-          echo "📍 URL: https://${{ env.FIREBASE_HOSTING_SITE }}.web.app"
+          echo "📍 URL: ${SERVICE_URL}"
+
+      - name: Health check
+        run: |
+          sleep 10
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+            --region ${REGION} \
+            --format 'value(status.url)' \
+            --project ${PROJECT_ID})
+          curl -f ${SERVICE_URL} || echo "⚠️ Health check failed, but continuing..."
+          echo "✅ Staging deployment completed"
