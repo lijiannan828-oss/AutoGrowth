@@ -1,8 +1,11 @@
 """Fission (裂变素材生成) related endpoints."""
 
+import logging
 import os
 import uuid
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
@@ -203,13 +206,14 @@ def list_videos(
                     elif hasattr(updated_at, 'isoformat'):
                         updated_str = updated_at.isoformat()
 
+                blob_name = meta.get("gcs_blob_name", "")
                 videos.append({
-                    "video_id": meta["video_id"],
-                    "name": meta["gcs_blob_name"].split("/")[-1],  # UUID 文件名（兼容）
+                    "video_id": meta.get("video_id", ""),
+                    "name": blob_name.split("/")[-1] if blob_name else "",
                     "display_name": meta.get("display_name"),
                     "original_filename": meta.get("original_filename"),
-                    "gcs_path": meta["gcs_path"],
-                    "size": meta["file_size"],
+                    "gcs_path": meta.get("gcs_path", ""),
+                    "size": meta.get("file_size", 0),
                     "updated": updated_str,
                 })
 
@@ -237,6 +241,7 @@ def list_videos(
 
         return {"videos": videos}
     except Exception as e:
+        logger.error(f"获取视频列表失败: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取视频列表失败: {str(e)}",
