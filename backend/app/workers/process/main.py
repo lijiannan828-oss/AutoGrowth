@@ -657,6 +657,11 @@ class DramaProcessWorker:
             all_pairs = self._convert_file_pairs_to_subtitle_pairs(file_pairs)
         else:
             # Standard jobs: Use shared discovery service for consistent sorting
+            _log(f"🔍 开始查找文件配对:")
+            _log(f"   drama_name: {self.drama_name}")
+            _log(f"   source_bucket: {self.source_bucket}")
+            _log(f"   allowed_languages: {self.allowed_languages}")
+
             file_pairs = discover_file_pairs(
                 drama_name=self.drama_name,
                 source_bucket=self.source_bucket,
@@ -664,6 +669,7 @@ class DramaProcessWorker:
                 max_pairs_per_language=self.max_pairs_per_language,
                 max_pairs_total=self.max_pairs_total,
             )
+            _log(f"✅ discover_file_pairs 返回 {len(file_pairs)} 个配对")
             # Convert FilePairInfo to SubtitlePair with Blob objects
             all_pairs = self._convert_file_pairs_to_subtitle_pairs(file_pairs)
         
@@ -717,7 +723,18 @@ class DramaProcessWorker:
         total = len(pairs)
         if total == 0:
             if len(all_pairs) == 0:
-                self._mark_failure("未在 GCS 中找到可压制的 mp4/srt 配对")
+                error_msg = (
+                    f"未在 GCS 中找到可压制的 mp4/srt 配对\n"
+                    f"  drama_name: {self.drama_name}\n"
+                    f"  source_bucket: {self.source_bucket}\n"
+                    f"  allowed_languages: {self.allowed_languages}\n"
+                    f"请检查:\n"
+                    f"  1. GCS 存储桶中是否存在该剧集的文件\n"
+                    f"  2. 文件命名是否符合规范（包含集数编号）\n"
+                    f"  3. mp4 和 srt 文件的集数编号是否匹配"
+                )
+                _log(f"❌ {error_msg}")
+                self._mark_failure(error_msg)
             else:
                 _log(
                     f"⚠️ Task {self.task_index}/{self.task_count}: "
