@@ -78,6 +78,7 @@ class SubtitleTask(BaseModel):
     progress: float = 0.0
     source_language: Optional[str] = None
     target_languages: List[str]
+    created_by: str  # 用户ID
     created_at: datetime
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None

@@ -115,7 +115,7 @@ async def get_all_tasks(
 ):
     """获取当前用户的所有任务"""
     _load_all_subtitle_tasks()
-    user_tasks = [t for t in tasks.values()]
+    user_tasks = [t for t in tasks.values() if t.created_by == current_user.user_id]
     return {"tasks": user_tasks, "total": len(user_tasks)}
 
 
@@ -170,6 +170,7 @@ async def upload_file(
         status=ProcessStatus.PENDING,
         source_language=source_language,
         target_languages=target_langs,
+        created_by=current_user.user_id,
         created_at=datetime.now(),
     )
     tasks[task_id] = task
