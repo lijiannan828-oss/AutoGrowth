@@ -191,6 +191,17 @@ def list_videos(
             # 转换为响应格式
             videos = []
             for meta in metadata_videos:
+                # 处理 Firestore Timestamp
+                updated_at = meta.get("updated_at")
+                updated_str = None
+                if updated_at:
+                    # Firestore Timestamp 有 _seconds 属性
+                    if hasattr(updated_at, '_seconds'):
+                        from datetime import datetime
+                        updated_str = datetime.fromtimestamp(updated_at._seconds).isoformat()
+                    elif hasattr(updated_at, 'isoformat'):
+                        updated_str = updated_at.isoformat()
+
                 videos.append({
                     "video_id": meta["video_id"],
                     "name": meta["gcs_blob_name"].split("/")[-1],  # UUID 文件名（兼容）
@@ -198,7 +209,7 @@ def list_videos(
                     "original_filename": meta.get("original_filename"),
                     "gcs_path": meta["gcs_path"],
                     "size": meta["file_size"],
-                    "updated": meta.get("updated_at").isoformat() if meta.get("updated_at") else None,
+                    "updated": updated_str,
                 })
 
             # 如果有元数据，直接返回
