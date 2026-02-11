@@ -83,17 +83,20 @@ export default function FissionDemoPage() {
               <label className="block text-sm font-medium text-gray-700 mb-2">
                 生成变体数量: <span className="text-blue-600 font-bold">{variantCount}</span>
               </label>
+              <div className="text-xs text-gray-500 mb-1">
+                预计用时: {variantCount < 2 ? '约30秒' : variantCount < 4 ? '约1-2分钟' : variantCount < 7 ? '约2-4分钟' : '约4-5分钟'}
+              </div>
               <input
                 type="range"
-                min="5"
-                max="20"
+                min="1"
+                max="10"
                 value={variantCount}
                 onChange={(e) => setVariantCount(parseInt(e.target.value))}
                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
               />
               <div className="flex justify-between text-xs text-gray-500 mt-1">
-                <span>5个</span>
-                <span>20个</span>
+                <span>1个</span>
+                <span>10个</span>
               </div>
             </div>
           </div>
