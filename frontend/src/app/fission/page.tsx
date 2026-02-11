@@ -137,6 +137,13 @@ export default function FissionPage() {
   const [videoDescription, setVideoDescription] = useState('');
   const [inputMode, setInputMode] = useState<'upload' | 'text'>('upload'); // 输入模式：上传或文字描述
 
+  // 新增：视频显示名称状态
+  const [videoDisplayName, setVideoDisplayName] = useState('');
+
+  // 新增：重命名相关状态
+  const [renamingVideoId, setRenamingVideoId] = useState<string | null>(null);
+  const [newDisplayName, setNewDisplayName] = useState('');
+
   // 图片贴纸选择器状态
   const [isImageStickerPickerOpen, setIsImageStickerPickerOpen] = useState(false);
   const [currentStickerTransformIndex, setCurrentStickerTransformIndex] = useState<number | null>(null);
@@ -338,10 +345,14 @@ export default function FissionPage() {
       }
       setSelectedFile(file);
       console.log('文件已选择:', file.name, file.type, file.size);
+
+      // 自动填充显示名称（使用文件名，去扩展名）
+      const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
+      setVideoDisplayName(nameWithoutExt);
+
       // 自动填充剧集名称（使用文件名）
       if (!dramaName) {
-        const name = file.name.replace(/\.[^/.]+$/, ''); // 去掉扩展名
-        setDramaName(name);
+        setDramaName(nameWithoutExt);
       }
     }
   };
@@ -360,6 +371,11 @@ export default function FissionPage() {
       const formData = new FormData();
       formData.append('file', selectedFile);
 
+      // 添加显示名称
+      if (videoDisplayName.trim()) {
+        formData.append('display_name', videoDisplayName.trim());
+      }
+
       // 模拟上传进度
       setUploadProgress(30);
 
@@ -375,14 +391,19 @@ export default function FissionPage() {
         },
       });
 
-      const { gcs_path } = response.data;
+      const { gcs_path, display_name } = response.data;
 
       // 设置GCS路径
       setSourceVideo(gcs_path);
       setUploadProgress(100);
-      alert('视频上传成功！');
+      alert(`上传成功: ${display_name || response.data.filename}`);
+
+      // 刷新视频列表
+      await loadGcsVideos();
+
+      // 清空状态
       setSelectedFile(null);
-      loadGcsVideos();
+      setVideoDisplayName('');
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -392,6 +413,27 @@ export default function FissionPage() {
       alert(`上传失败: ${errorMsg}`);
     } finally {
       setUploading(false);
+    }
+  };
+
+  // 重命名视频
+  const handleRename = async (videoId: string) => {
+    if (!newDisplayName.trim()) {
+      alert('请输入新名称');
+      return;
+    }
+
+    try {
+      await apiClient.patch(`/fission/videos/${videoId}`, {
+        display_name: newDisplayName.trim(),
+      });
+
+      alert('重命名成功');
+      await loadGcsVideos();
+      setRenamingVideoId(null);
+      setNewDisplayName('');
+    } catch (error: any) {
+      alert(`重命名失败: ${error.response?.data?.detail || error.message}`);
     }
   };
 
@@ -466,6 +508,40 @@ export default function FissionPage() {
 
             {/* 上传按钮 & 进度条 */}
             {selectedFile && (
+              <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <div className="flex items-start gap-3">
+                  <div className="flex-shrink-0 mt-1">
+                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-blue-900 mb-1">
+                      已选择: {selectedFile.name}
+                    </p>
+                    <p className="text-xs text-blue-700 mb-3">
+                      大小: {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
+                    </p>
+
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      视频显示名称
+                    </label>
+                    <input
+                      type="text"
+                      value={videoDisplayName}
+                      onChange={(e) => setVideoDisplayName(e.target.value)}
+                      placeholder="输入视频名称"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      maxLength={100}
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      💡 此名称将显示在视频列表中，方便识别
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+            {selectedFile && (
               <div className="mt-3">
                 <button onClick={handleUpload} disabled={!selectedFile || uploading}
                   className="w-full py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
@@ -511,11 +587,26 @@ export default function FissionPage() {
                   >
                     <option value="">-- 选择已有视频 --</option>
                     {gcsVideos.map((video, idx) => (
-                      <option key={idx} value={video.gcs_path}>
-                        {video.name}
+                      <option key={video.video_id || idx} value={video.gcs_path}>
+                        {video.display_name || video.name}
+                        {video.display_name && video.original_filename && ` (${video.original_filename})`}
                       </option>
                     ))}
                   </select>
+                )}
+                {sourceVideo && (
+                  <button
+                    onClick={() => {
+                      const video = gcsVideos.find(v => v.gcs_path === sourceVideo);
+                      if (video && video.video_id) {
+                        setRenamingVideoId(video.video_id);
+                        setNewDisplayName(video.display_name || video.name);
+                      }
+                    }}
+                    className="mt-2 text-sm text-blue-600 hover:text-blue-800"
+                  >
+                    ✏️ 重命名此视频
+                  </button>
                 )}
                 <input
                   type="text"
@@ -1056,6 +1147,40 @@ export default function FissionPage() {
           }
         }}
       />
+
+      {/* 重命名对话框 */}
+      {renamingVideoId && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold mb-4">重命名视频</h3>
+            <input
+              type="text"
+              value={newDisplayName}
+              onChange={(e) => setNewDisplayName(e.target.value)}
+              className="w-full px-3 py-2 border rounded-lg mb-4"
+              maxLength={100}
+              autoFocus
+            />
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => {
+                  setRenamingVideoId(null);
+                  setNewDisplayName('');
+                }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => handleRename(renamingVideoId)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              >
+                确认
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

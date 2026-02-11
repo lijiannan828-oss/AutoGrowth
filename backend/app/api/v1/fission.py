@@ -173,20 +173,47 @@ LOCAL_UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads" / "fis
 def list_videos(
     current_user: Optional[AuthenticatedUser] = Depends(get_current_user_optional),
 ):
-    """列出GCS桶中的所有视频文件"""
+    """列出用户的视频（优先从元数据读取）"""
     from google.cloud import storage
     from app.core.config import settings
+    from app.services.video_metadata_service import VideoMetadataService
 
     try:
         storage_client = storage.Client()
         bucket_name = settings.fission_upload_bucket or "vigloo-fission-uploads"
         bucket = storage_client.bucket(bucket_name)
 
+        # 如果用户已登录，优先从 Firestore 读取元数据
+        if current_user:
+            metadata_service = VideoMetadataService()
+            metadata_videos = metadata_service.list_user_videos(current_user.user_id)
+
+            # 转换为响应格式
+            videos = []
+            for meta in metadata_videos:
+                videos.append({
+                    "video_id": meta["video_id"],
+                    "name": meta["gcs_blob_name"].split("/")[-1],  # UUID 文件名（兼容）
+                    "display_name": meta.get("display_name"),
+                    "original_filename": meta.get("original_filename"),
+                    "gcs_path": meta["gcs_path"],
+                    "size": meta["file_size"],
+                    "updated": meta.get("updated_at").isoformat() if meta.get("updated_at") else None,
+                })
+
+            # 如果有元数据，直接返回
+            if videos:
+                return {"videos": videos}
+
+        # 兼容模式：从 GCS 直接读取（用于旧数据或未登录用户）
         videos = []
         for blob in bucket.list_blobs():
             if blob.name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
                 videos.append({
+                    "video_id": blob.name,  # 使用 blob name 作为临时 ID
                     "name": blob.name.split('/')[-1],
+                    "display_name": None,  # 旧数据没有显示名称
+                    "original_filename": None,
                     "gcs_path": f"gs://{bucket_name}/{blob.name}",
                     "size": blob.size,
                     "updated": blob.updated.isoformat() if blob.updated else None,
@@ -248,11 +275,18 @@ def test_gcs_connection():
 )
 async def upload_video(
     file: UploadFile = File(...),
+    display_name: Optional[str] = Form(None),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """直接上传视频文件到GCS存储桶"""
+    """上传视频文件到 GCS 并创建元数据"""
     from google.cloud import storage
     from app.core.config import settings
+    from app.services.video_metadata_service import VideoMetadataService
+    from app.schemas.fission import VideoUploadResponse
+
+    # 验证文件类型
+    if not file.content_type or not file.content_type.startswith("video/"):
+        raise HTTPException(status_code=400, detail="只支持视频文件")
 
     try:
         # 生成唯一文件名
@@ -276,11 +310,40 @@ async def upload_video(
         content_type = file.content_type or "video/mp4"
         blob.upload_from_string(content, content_type=content_type)
 
-        return {
-            "filename": unique_filename,
-            "gcs_path": gcs_path,
-            "size": len(content),
-        }
+        # 确定显示名称
+        if not display_name or not display_name.strip():
+            # 使用原始文件名（去扩展名）
+            display_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+
+        # 创建元数据
+        metadata_service = VideoMetadataService()
+        try:
+            video_id = metadata_service.create_video_metadata(
+                user_id=current_user.user_id,
+                gcs_path=gcs_path,
+                gcs_bucket=bucket_name,
+                gcs_blob_name=blob_name,
+                display_name=display_name.strip(),
+                original_filename=file.filename,
+                file_size=len(content),
+                content_type=content_type,
+                file_extension=file_ext,
+            )
+        except Exception as e:
+            # 元数据创建失败，删除已上传的文件
+            blob.delete()
+            raise HTTPException(status_code=500, detail=f"元数据创建失败: {str(e)}")
+
+        return VideoUploadResponse(
+            video_id=video_id,
+            filename=unique_filename,
+            display_name=display_name.strip(),
+            original_filename=file.filename,
+            gcs_path=gcs_path,
+            size=len(content),
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -337,3 +400,48 @@ def get_upload_url(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"生成上传URL失败: {str(e)}",
         )
+
+
+@router.patch(
+    "/videos/{video_id}",
+    summary="重命名视频",
+)
+def rename_video(
+    video_id: str,
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """更新视频显示名称"""
+    from app.services.video_metadata_service import VideoMetadataService
+    from app.schemas.fission import VideoRenameRequest
+
+    # 验证请求数据
+    try:
+        rename_request = VideoRenameRequest(**payload)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"请求数据无效: {str(e)}")
+
+    metadata_service = VideoMetadataService()
+
+    try:
+        success = metadata_service.update_display_name(
+            video_id=video_id,
+            user_id=current_user.user_id,
+            display_name=rename_request.display_name,
+        )
+
+        if not success:
+            raise HTTPException(status_code=404, detail="视频不存在")
+
+        return {
+            "video_id": video_id,
+            "display_name": rename_request.display_name,
+            "message": "重命名成功",
+        }
+
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重命名失败: {str(e)}")

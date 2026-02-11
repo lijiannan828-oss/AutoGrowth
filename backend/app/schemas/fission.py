@@ -134,3 +134,48 @@ class StickerAsset(BaseModel):
 class StickerListResponse(BaseModel):
     """贴纸列表响应"""
     stickers: List[StickerAsset]
+
+
+# ==================== 视频元数据模型 ====================
+
+class VideoMetadata(BaseModel):
+    """视频元数据模型"""
+    video_id: str
+    user_id: str
+    gcs_path: str
+    gcs_bucket: str
+    gcs_blob_name: str
+    display_name: str
+    original_filename: str
+    file_size: int
+    content_type: str
+    file_extension: str
+    created_at: datetime
+    updated_at: datetime
+    status: str = "active"
+
+
+class VideoUploadResponse(BaseModel):
+    """视频上传响应"""
+    video_id: str
+    filename: str = Field(..., description="UUID 文件名（兼容）")
+    display_name: str
+    original_filename: str
+    gcs_path: str
+    size: int
+
+
+class VideoListItem(BaseModel):
+    """视频列表项"""
+    video_id: str
+    name: str = Field(..., description="UUID 文件名（兼容旧代码）")
+    display_name: Optional[str] = None
+    original_filename: Optional[str] = None
+    gcs_path: str
+    size: int
+    updated: Optional[str] = None
+
+
+class VideoRenameRequest(BaseModel):
+    """视频重命名请求"""
+    display_name: str = Field(..., min_length=1, max_length=100)
