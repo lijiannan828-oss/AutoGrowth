@@ -383,6 +383,7 @@ export default function FissionPage() {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        timeout: 300000, // 5分钟超时，支持大文件上传
         onUploadProgress: (progressEvent) => {
           if (progressEvent.total) {
             const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
