@@ -194,8 +194,10 @@ export default function SubtitlePage() {
             <div className="text-sm text-gray-500">处理中</div>
           </div>
           <div className="bg-white rounded-xl p-4 text-center shadow-sm">
-            <div className="text-3xl font-bold text-purple-600">{languages.length}</div>
-            <div className="text-sm text-gray-500">支持语言</div>
+            <div className="text-3xl font-bold text-purple-600">
+              {tasks.filter((t) => t.status === "completed" && t.subtitle_files).reduce((sum, t) => sum + (t.subtitle_files?.length || 0), 0)}
+            </div>
+            <div className="text-sm text-gray-500">已上传</div>
           </div>
         </div>
 
@@ -325,43 +327,44 @@ export default function SubtitlePage() {
                 <div key={task.task_id} className="border rounded-xl p-5">
                   <div className="flex justify-between items-start">
                     <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-1">
-                        <span className="font-semibold">📄 {task.filename}</span>
-                        <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(task.status)}`}>
-                          {getStatusText(task.status)}
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-500 mt-1">
+                      <h3 className="font-semibold">📄 {task.filename}</h3>
+                      <p className="text-sm text-gray-500">
                         目标语言: {task.target_languages.map(code => languages.find(l => l.code === code)?.name || code).join(", ")}
                       </p>
                     </div>
                     <div className="flex items-center gap-3">
-                      {task.status === "processing" && (
-                        <span className="text-sm text-gray-500">{Math.round(task.progress * 100)}%</span>
-                      )}
+                      <div className="text-right">
+                        <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(task.status)}`}>
+                          {task.status === 'completed' ? '✅ 已完成' :
+                           task.status === 'processing' ? '⏳ 处理中' :
+                           task.status === 'failed' ? '❌ 失败' :
+                           '🕐 等待处理'}
+                        </span>
+                        <p className="text-sm text-gray-500 mt-1">{Math.round(task.progress * 100)}%</p>
+                      </div>
                       <button
                         onClick={() => setExpandedTask(isExpanded ? null : task.task_id)}
-                        className={`px-4 py-2 rounded-lg text-sm ${isExpanded ? "bg-gray-200 text-gray-700" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}
+                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
                       >
                         {isExpanded ? "收起详情" : "查看详情"}
                       </button>
                     </div>
                   </div>
 
-                  {/* 进度条 */}
-                  {(task.status === "processing" || task.status === "pending") && (
-                    <div className="mt-3">
-                      <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all"
-                          style={{ width: `${task.progress * 100}%` }} />
-                      </div>
+                  {/* 错误信息显示 */}
+                  {task.status === "failed" && task.error_message && (
+                    <div className="mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
+                      ❌ {task.error_message}
                     </div>
                   )}
 
-                  {/* 错误信息 */}
-                  {task.status === "failed" && task.error_message && (
-                    <div className="bg-red-50 border border-red-200 rounded-lg p-3 mt-3 text-red-700 text-sm">
-                      ❌ 错误: {task.error_message}
+                  {/* 进度条 */}
+                  {task.status === "processing" && (
+                    <div className="mt-3">
+                      <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+                        <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all"
+                          style={{ width: `${task.progress * 100}%` }} />
+                      </div>
                     </div>
                   )}
 

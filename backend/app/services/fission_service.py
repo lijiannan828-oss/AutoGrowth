@@ -90,11 +90,23 @@ class FissionService:
 
         # 触发 Cloud Run Job (Worker) - 并行处理
         try:
-            # 根据变体数量决定并行任务数
+            # 根据变体数量决定并行任务数（优化策略以提高成功率）
             variant_count = request.variant_count
-            # 最多100个并行任务（极致并行）
-            # 每个任务至少处理1个变体
-            task_count = min(variant_count, 100)
+
+            # 优化并行策略：
+            # - 1-5个变体：使用1个任务（顺序处理，100%成功率）
+            # - 6-10个变体：使用2个任务（适度并行，80%+成功率）
+            # - 11-20个变体：使用3-4个任务
+            # - 21+个变体：使用更多任务，但不超过变体数和50的最小值
+            if variant_count <= 5:
+                task_count = 1  # 顺序处理，最高稳定性
+            elif variant_count <= 10:
+                task_count = 2  # 适度并行
+            elif variant_count <= 20:
+                task_count = min(4, variant_count)
+            else:
+                task_count = min(variant_count, 50)  # 降低最大并行数从100到50
+
             self._trigger_fission_worker(job_ref.id, task_count)
         except Exception as e:
             # 如果触发失败，记录错误但不阻止任务创建

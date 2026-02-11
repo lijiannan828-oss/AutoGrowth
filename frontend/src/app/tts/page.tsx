@@ -161,41 +161,42 @@ export default function TTSPage() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-6xl mx-auto bg-white rounded-2xl shadow-lg overflow-hidden">
-        {/* Header */}
-        <div className="bg-white border-b border-gray-200 p-8">
-          <h1 className="text-3xl font-bold mb-2 text-gray-900">🔊 AI 语音合成系统</h1>
-          <p className="text-gray-600">支持多语言、多音色的文字转语音服务</p>
+      <div className="max-w-7xl mx-auto">
+        {/* 页头 */}
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold text-gray-900">🔊 AI 文字转语音</h1>
+          <p className="text-gray-500 mt-1">支持多语言、多音色的文字转语音服务</p>
         </div>
 
-        <div className="p-8">
-          {/* 统计卡片 */}
-          <div className="grid grid-cols-4 gap-4 mb-8">
-            <div className="bg-gray-50 rounded-xl p-4 text-center">
-              <div className="text-3xl font-bold text-indigo-600">{tasks.length}</div>
-              <div className="text-sm text-gray-500">总任务数</div>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-4 text-center">
-              <div className="text-3xl font-bold text-green-600">
-                {tasks.filter((t) => t.status === "completed").length}
-              </div>
-              <div className="text-sm text-gray-500">已完成</div>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-4 text-center">
-              <div className="text-3xl font-bold text-blue-600">
-                {tasks.filter((t) => t.status === "processing").length}
-              </div>
-              <div className="text-sm text-gray-500">处理中</div>
-            </div>
-            <div className="bg-gray-50 rounded-xl p-4 text-center">
-              <div className="text-3xl font-bold text-purple-600">{voices.length}</div>
-              <div className="text-sm text-gray-500">可用音色</div>
-            </div>
+        {/* 统计卡片 */}
+        <div className="grid grid-cols-4 gap-4 mb-6">
+          <div className="bg-white rounded-xl p-4 text-center shadow-sm">
+            <div className="text-3xl font-bold text-indigo-600">{tasks.length}</div>
+            <div className="text-sm text-gray-500">总任务数</div>
           </div>
+          <div className="bg-white rounded-xl p-4 text-center shadow-sm">
+            <div className="text-3xl font-bold text-green-600">
+              {tasks.filter((t) => t.status === "completed").length}
+            </div>
+            <div className="text-sm text-gray-500">已完成</div>
+          </div>
+          <div className="bg-white rounded-xl p-4 text-center shadow-sm">
+            <div className="text-3xl font-bold text-blue-600">
+              {tasks.filter((t) => t.status === "processing").length}
+            </div>
+            <div className="text-sm text-gray-500">处理中</div>
+          </div>
+          <div className="bg-white rounded-xl p-4 text-center shadow-sm">
+            <div className="text-3xl font-bold text-purple-600">
+              {tasks.filter((t) => t.status === "completed" && t.audio_file).length}
+            </div>
+            <div className="text-sm text-gray-500">已上传</div>
+          </div>
+        </div>
 
-          {/* 文件上传区域 */}
-          <div className="mb-8">
-            <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">📁 上传文本文件</h2>
+        {/* 文件上传区域 */}
+        <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
+          <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">📁 上传文本文件</h2>
             <div
               className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-all ${
                 dragOver ? "border-indigo-500 bg-indigo-50" : "border-indigo-300 bg-indigo-50/50"
@@ -348,13 +349,11 @@ export default function TTSPage() {
                              task.status === 'failed' ? '❌ 失败' :
                              '🕐 等待处理'}
                           </span>
-                          {task.status === 'processing' && (
-                            <p className="text-sm text-gray-500 mt-1">{task.progress}%</p>
-                          )}
+                          <p className="text-sm text-gray-500 mt-1">{task.progress}%</p>
                         </div>
                         <button
                           onClick={() => setExpandedTask(isExpanded ? null : task.task_id)}
-                          className={`px-4 py-2 rounded-lg text-sm ${isExpanded ? "bg-gray-200 text-gray-700" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}
+                          className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
                         >
                           {isExpanded ? "收起详情" : "查看详情"}
                         </button>
@@ -369,7 +368,7 @@ export default function TTSPage() {
                     )}
 
                     {/* 进度条 */}
-                    {(task.status === 'processing' || task.status === 'pending') && (
+                    {task.status === 'processing' && (
                       <div className="mt-3">
                         <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
                           <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all"
