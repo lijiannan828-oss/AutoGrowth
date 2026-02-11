@@ -288,7 +288,24 @@ export default function FissionPage() {
       }
     } catch (error: any) {
       console.error('创建任务时发生错误:', error);
-      const errorMsg = error.response?.data?.detail || error.message || String(error);
+      let errorMsg = '未知错误';
+
+      if (error.response?.data?.detail) {
+        const detail = error.response.data.detail;
+        // 如果detail是对象，尝试提取message字段或转换为JSON
+        if (typeof detail === 'object') {
+          errorMsg = detail.message || JSON.stringify(detail);
+        } else {
+          errorMsg = String(detail);
+        }
+      } else if (error.response?.data?.message) {
+        errorMsg = error.response.data.message;
+      } else if (error.message) {
+        errorMsg = error.message;
+      } else {
+        errorMsg = String(error);
+      }
+
       alert(`创建失败: ${errorMsg}`);
     } finally {
       setLoading(false);
