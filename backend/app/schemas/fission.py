@@ -54,7 +54,7 @@ class FissionJobRequest(BaseModel):
     """创建裂变任务请求"""
     source_video_path: str = Field(..., description="源视频 GCS 路径")
     drama_name: str = Field(..., description="剧集名称")
-    variant_count: int = Field(default=5, ge=5, le=20, description="生成变体数量")
+    variant_count: int = Field(default=5, ge=1, le=10, description="生成变体数量")
     transforms: List[TransformConfig] = Field(..., description="变换配置列表")
     max_output_size_mb: int = Field(default=500, le=500, description="最大输出大小(MB)")
     duration_variance_percent: int = Field(default=20, ge=0, le=30, description="时长变化百分比")
@@ -66,13 +66,6 @@ class FissionJobRequest(BaseModel):
         enabled = [t for t in value if t.enabled]
         if not enabled:
             raise ValueError("至少需要启用一种变换")
-        return value
-
-    @field_validator("variant_count")
-    @classmethod
-    def validate_variant_count(cls, value: int) -> int:
-        if value < 5:
-            raise ValueError("最少需要生成 5 个变体")
         return value
 
 
