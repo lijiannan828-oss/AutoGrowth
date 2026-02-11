@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
 
 from app.api.deps import get_current_user, get_current_user_optional
 from app.schemas.auth import AuthenticatedUser
