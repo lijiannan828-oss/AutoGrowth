@@ -460,12 +460,10 @@ class FissionWorker:
         # 根据视频时长动态调整切片大小
         video_info = self._get_video_info(input_path)
         duration = video_info.get("duration", 0)
-        if duration > 3600:
-            seg_duration = 120  # 超过1小时：120秒切片
-        elif duration > 600:
-            seg_duration = 60   # 10分钟~1小时：60秒切片
+        if duration > 480:
+            seg_duration = 10   # 超过8分钟：10秒切片
         else:
-            seg_duration = 20   # 短视频：20秒切片
+            seg_duration = 5    # 8分钟以内：5秒切片
         segment_files = self._split_video(input_path, temp_dir, segment_duration=seg_duration)
 
         if len(segment_files) == 1:
