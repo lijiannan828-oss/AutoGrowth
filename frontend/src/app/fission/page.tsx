@@ -1090,21 +1090,6 @@ export default function FissionPage() {
                         </span>
                         <p className="text-sm text-gray-500 mt-1">{job.progress}%</p>
                       </div>
-                      {(job.status === 'FAILED' || job.status === 'QUEUED') && (
-                        <button
-                          onClick={async () => {
-                            try {
-                              await apiClient.post(`/fission/jobs/${job.job_id}/retry`);
-                              loadJobs();
-                            } catch (error: any) {
-                              alert(`重试失败: ${error.response?.data?.detail || error.message}`);
-                            }
-                          }}
-                          className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 text-sm"
-                        >
-                          🔄 重试
-                        </button>
-                      )}
                       <button
                         onClick={() => toggleJobDetail(job.job_id)}
                         className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
@@ -1116,7 +1101,7 @@ export default function FissionPage() {
 
                   {(job.status === 'PROCESSING' || job.status === 'QUEUED') && (() => {
                     const startTime = processingStartTimesRef.current[job.job_id];
-                    const isStuck = job.status === 'PROCESSING' && job.progress === 0 && startTime && (Date.now() - startTime > 3 * 60 * 1000);
+                    const isStuck = job.status === 'PROCESSING' && job.progress === 0 && startTime && (Date.now() - startTime > 60 * 60 * 1000);
                     return (
                     <div className="mt-3">
                       <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
@@ -1130,7 +1115,7 @@ export default function FissionPage() {
                         )}
                       </div>
                       <p className={`text-xs mt-1 ${isStuck ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
-                        {job.status === 'QUEUED' ? '排队等待 Worker 启动...' : isStuck ? '处理超时：3 分钟内无进度，Worker 可能异常' : `处理中 ${job.progress}%`}
+                        {job.status === 'QUEUED' ? '排队等待 Worker 启动...' : isStuck ? '处理超时：1 小时内无进度，Worker 可能异常' : `处理中 ${job.progress}%`}
                       </p>
                     </div>
                     );
@@ -1157,6 +1142,23 @@ export default function FissionPage() {
                           <div>
                             <span className="text-gray-600">创建时间：</span>
                             <span>{detail.created_at ? new Date(detail.created_at).toLocaleString('zh-CN') : '-'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">生成用时：</span>
+                            <span>{(() => {
+                              if (!detail.created_at) return '-';
+                              const start = new Date(detail.created_at).getTime();
+                              const end = detail.updated_at && (job.status === 'COMPLETED' || job.status === 'FAILED')
+                                ? new Date(detail.updated_at).getTime()
+                                : Date.now();
+                              const diffSec = Math.floor((end - start) / 1000);
+                              if (diffSec < 60) return `${diffSec}秒`;
+                              const min = Math.floor(diffSec / 60);
+                              const sec = diffSec % 60;
+                              if (min < 60) return `${min}分${sec}秒`;
+                              const hr = Math.floor(min / 60);
+                              return `${hr}小时${min % 60}分`;
+                            })()}</span>
                           </div>
                         </div>
                         {/* 任务配置信息 */}
