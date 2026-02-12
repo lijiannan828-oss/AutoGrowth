@@ -93,19 +93,16 @@ class FissionService:
             # 根据变体数量决定并行任务数（优化策略以提高成功率）
             variant_count = request.variant_count
 
-            # 优化并行策略：
-            # - 1-5个变体：使用1个任务（顺序处理，100%成功率）
-            # - 6-10个变体：使用2个任务（适度并行，80%+成功率）
-            # - 11-20个变体：使用3-4个任务
-            # - 21+个变体：使用更多任务，但不超过变体数和50的最小值
+            # 并行策略（worker 内部已优化分批并行 + 内存清理）：
+            # - 1-5个变体：1个任务
+            # - 6-15个变体：2个任务
+            # - 16+个变体：3个任务（每个任务内部也会并行处理片段）
             if variant_count <= 5:
-                task_count = 1  # 顺序处理，最高稳定性
-            elif variant_count <= 10:
-                task_count = 2  # 适度并行
-            elif variant_count <= 20:
-                task_count = min(4, variant_count)
+                task_count = 1
+            elif variant_count <= 15:
+                task_count = 2
             else:
-                task_count = min(variant_count, 50)  # 降低最大并行数从100到50
+                task_count = 3
 
             self._trigger_fission_worker(job_ref.id, task_count)
         except Exception as e:
@@ -122,6 +119,8 @@ class FissionService:
         page_size: int = 20,
     ) -> Tuple[List[FissionJobListItem], int]:
         """获取裂变任务列表（支持分页）"""
+        from datetime import datetime, timezone, timedelta
+
         query = self._firestore.collection(self._jobs_collection)
 
         # 按状态筛选
@@ -139,15 +138,39 @@ class FissionService:
         all_docs = list(query.stream())
         total = len(all_docs)
 
-        # 统计进度>=80%的任务数（兼容 progress 为字符串的情况）
+        now = datetime.now(timezone.utc)
+        stale_timeout = timedelta(minutes=3)
+
+        # 统计进度>=80%的任务数 + 自动标记超时任务为 FAILED
         completed_count = 0
+        overridden = {}  # doc.id -> 被修正的字段，供分页循环使用
         for doc in all_docs:
+            data = doc.to_dict() or {}
             try:
-                p = (doc.to_dict() or {}).get("progress", 0)
+                p = data.get("progress", 0)
                 if int(p) >= 80:
                     completed_count += 1
             except (ValueError, TypeError):
                 pass
+
+            # 超时检测：PROCESSING + 进度 0% + 超过 3 分钟未更新 → 自动标记 FAILED
+            if data.get("status") == "PROCESSING" and int(data.get("progress", 0)) == 0:
+                updated_at = data.get("updated_at")
+                if updated_at and hasattr(updated_at, "timestamp"):
+                    elapsed = now - updated_at.replace(tzinfo=timezone.utc) if updated_at.tzinfo is None else now - updated_at
+                    if elapsed > stale_timeout:
+                        try:
+                            doc.reference.update({
+                                "status": "FAILED",
+                                "error_message": "处理超时：任务启动超过3分钟仍无进度，已自动标记失败",
+                                "updated_at": SERVER_TIMESTAMP,
+                            })
+                            overridden[doc.id] = {
+                                "status": "FAILED",
+                                "error_message": "处理超时：任务启动超过3分钟仍无进度，已自动标记失败",
+                            }
+                        except Exception as e:
+                            print(f"[WARN] 自动标记超时任务失败: {doc.id}: {e}")
 
         # 分页
         offset = (page - 1) * page_size
@@ -156,6 +179,9 @@ class FissionService:
         jobs = []
         for doc in paginated_docs:
             data = doc.to_dict() or {}
+            # 应用本次请求中被修正的字段
+            if doc.id in overridden:
+                data.update(overridden[doc.id])
             jobs.append(
                 FissionJobListItem(
                     job_id=doc.id,
@@ -305,10 +331,10 @@ class FissionService:
         variant_count = data.get("variant_count", 5)
         if variant_count <= 5:
             task_count = 1
-        elif variant_count <= 10:
+        elif variant_count <= 15:
             task_count = 2
         else:
-            task_count = min(4, variant_count)
+            task_count = 3
 
         doc_ref.update({
             "status": "QUEUED",

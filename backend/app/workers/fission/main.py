@@ -340,7 +340,7 @@ class FissionWorker:
         return {"duration": duration, "width": width, "height": height}
 
     def _split_video(self, input_path: str, temp_dir: str, segment_duration: int = 120) -> List[str]:
-        """将视频切成多段（使用 copy 模式，极快）
+        """将视频切成多段（使用 segment muxer，单次 ffmpeg 调用）
 
         Args:
             input_path: 输入视频路径
@@ -351,6 +351,7 @@ class FissionWorker:
             切片文件路径列表
         """
         import time
+        import glob as glob_mod
         start_time = time.time()
 
         # 获取视频时长
@@ -362,34 +363,31 @@ class FissionWorker:
             print(f"[INFO] Video duration {duration:.1f}s <= {segment_duration}s, no split needed")
             return [input_path]
 
-        # 计算切片数量
-        num_segments = int(duration / segment_duration) + (1 if duration % segment_duration > 0 else 0)
-        print(f"[INFO] Splitting {duration:.1f}s video into {num_segments} segments")
+        num_segments_est = int(duration / segment_duration) + 1
+        print(f"[INFO] Splitting {duration:.1f}s video into ~{num_segments_est} segments (single ffmpeg call)")
 
-        segment_files = []
-        for i in range(num_segments):
-            start = i * segment_duration
-            segment_file = os.path.join(temp_dir, f"segment_{i:03d}.mp4")
+        # 使用 segment muxer 一次性切片，比循环调用 N 次 ffmpeg 快得多
+        pattern = os.path.join(temp_dir, "segment_%03d.mp4")
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-c", "copy",
+            "-f", "segment",
+            "-segment_time", str(segment_duration),
+            "-reset_timestamps", "1",
+            "-avoid_negative_ts", "make_zero",
+            pattern
+        ]
 
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", str(start),
-                "-i", input_path,
-                "-t", str(segment_duration),
-                "-c", "copy",  # 不重编码，极快
-                "-avoid_negative_ts", "make_zero",
-                segment_file
-            ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[ERROR] Segment split failed: {result.stderr[-300:]}")
+            raise Exception(f"Segment split failed: {result.stderr[-300:]}")
 
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"[ERROR] Split segment {i} failed: {result.stderr[-300:]}")
-                raise Exception(f"Split failed at segment {i}")
-
-            segment_files.append(segment_file)
+        segment_files = sorted(glob_mod.glob(os.path.join(temp_dir, "segment_*.mp4")))
 
         elapsed = time.time() - start_time
-        print(f"[INFO] Split completed in {elapsed:.1f}s, {num_segments} segments created")
+        print(f"[INFO] Split completed in {elapsed:.1f}s, {len(segment_files)} segments created (single call)")
         return segment_files
 
     def _concat_segments(self, segment_files: List[str], output_path: str) -> None:
@@ -443,24 +441,35 @@ class FissionWorker:
         temp_dir: str,
         variant_index: int
     ) -> None:
-        """分片串行处理长视频（内存优化版）
+        """分片并行处理长视频（性能优化版）
 
-        串行处理每个片段，处理完立即删除原始切片释放内存。
-        Cloud Run 的 /tmp 是 tmpfs（内存文件系统），减少临时文件 = 减少内存占用。
+        并行处理 + 分批合并，兼顾速度和 tmpfs 内存占用。
+        Cloud Run 的 /tmp 是 tmpfs（内存文件系统），通过分批合并控制内存。
 
-        1. 切片（copy模式，极快）
-        2. 串行处理每个片段，处理完立即删除原始切片
-        3. 合并（copy模式，极快），合并后删除已处理片段
+        策略：
+        1. 切片（segment muxer，单次 ffmpeg 调用）
+        2. 每批 BATCH_SIZE 个片段，用 ThreadPoolExecutor 并行处理
+        3. 每批处理完做一次中间合并，释放已处理片段文件
+        4. 最终合并所有中间文件
         """
         import time
+        import gc
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total_start = time.time()
+        # 可通过环境变量调整并发数，默认 2（Cloud Run tmpfs 内存有限，保守起见）
+        MAX_WORKERS = int(os.environ.get("FISSION_PARALLEL_SEGMENTS", "2"))
+        BATCH_SIZE = MAX_WORKERS * 3  # 每批处理量 = 并发数 × 3
 
-        # 1. 自适应切片：目标 8-12 个切片，每片至少 15 秒
+        # 根据视频时长动态调整切片大小，减少 ffmpeg 调用次数
         video_info = self._get_video_info(input_path)
         duration = video_info.get("duration", 0)
-        target_segments = 10
-        seg_duration = max(15, int(duration / target_segments))
+        if duration > 3600:
+            seg_duration = 120  # 超过1小时：120秒切片
+        elif duration > 600:
+            seg_duration = 60   # 10分钟~1小时：60秒切片
+        else:
+            seg_duration = 20   # 短视频：20秒切片
         segment_files = self._split_video(input_path, temp_dir, segment_duration=seg_duration)
 
         if len(segment_files) == 1:
@@ -468,37 +477,73 @@ class FissionWorker:
             self._apply_transforms_optimized(input_path, output_path, video_filters, audio_filters)
             return
 
-        # 2. 串行处理每个片段，处理完立即删除原始切片释放内存
         total = len(segment_files)
-        print(f"[INFO] Processing {total} segments (each ~{seg_duration}s) sequentially to save memory")
+        print(f"[INFO] 并行处理 {total} 个片段（{MAX_WORKERS} 并发，每段约 {seg_duration}s），每 {BATCH_SIZE} 个片段中间合并一次")
 
-        processed_segments = []
-        for seg_idx, seg_path in enumerate(segment_files):
+        def _process_one_segment(seg_idx: int, seg_path: str) -> str:
+            """处理单个片段，返回输出路径"""
             output_seg = os.path.join(temp_dir, f"processed_{variant_index}_{seg_idx:03d}.mp4")
-            print(f"[INFO] Processing segment {seg_idx+1}/{total}")
-
             try:
                 self._apply_transforms_optimized(seg_path, output_seg, video_filters, audio_filters)
-                processed_segments.append(output_seg)
-                print(f"[INFO] Segment {seg_idx+1}/{total} completed")
-            except Exception as e:
-                print(f"[ERROR] Segment {seg_idx+1} failed: {e}")
-                raise
             finally:
-                # 立即删除原始切片文件释放内存
+                # 处理完立即删除原始切片释放 tmpfs 内存
                 if seg_path != input_path and os.path.exists(seg_path):
                     os.remove(seg_path)
+            return output_seg
 
-        # 3. 合并
-        self._concat_segments(processed_segments, output_path)
+        # 2. 分批并行处理 + 中间合并
+        intermediate_files = []
 
-        # 合并完成后删除所有已处理片段文件
-        for seg in processed_segments:
-            if os.path.exists(seg):
-                os.remove(seg)
+        for batch_start in range(0, total, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, total)
+            batch_items = [(i, segment_files[i]) for i in range(batch_start, batch_end)]
+            batch_results = {}
+
+            print(f"[INFO] 开始处理批次 {batch_start//BATCH_SIZE + 1}（片段 {batch_start+1}-{batch_end}/{total}）")
+
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(_process_one_segment, idx, path): idx
+                    for idx, path in batch_items
+                }
+                for future in as_completed(futures):
+                    seg_idx = futures[future]
+                    try:
+                        output_seg = future.result()
+                        batch_results[seg_idx] = output_seg
+                        print(f"[INFO] 片段 {seg_idx+1}/{total} 处理完成")
+                    except Exception as e:
+                        print(f"[ERROR] 片段 {seg_idx+1}/{total} 处理失败: {e}")
+                        raise
+
+            # 按索引排序，保证合并顺序正确
+            batch_processed = [batch_results[i] for i in sorted(batch_results.keys())]
+
+            # 中间合并
+            batch_idx = len(intermediate_files)
+            intermediate_path = os.path.join(temp_dir, f"intermediate_{variant_index}_{batch_idx:03d}.mp4")
+            self._concat_segments(batch_processed, intermediate_path)
+
+            # 删除当前批次的已处理片段文件
+            for seg in batch_processed:
+                if os.path.exists(seg):
+                    os.remove(seg)
+
+            intermediate_files.append(intermediate_path)
+            print(f"[INFO] 中间合并完成（批次 {batch_idx+1}），已释放 {len(batch_processed)} 个片段文件")
+            gc.collect()
+
+        # 3. 最终合并所有中间文件
+        if len(intermediate_files) == 1:
+            os.rename(intermediate_files[0], output_path)
+        else:
+            self._concat_segments(intermediate_files, output_path)
+            for f in intermediate_files:
+                if os.path.exists(f):
+                    os.remove(f)
 
         total_elapsed = time.time() - total_start
-        print(f"[INFO] Segmented processing completed in {total_elapsed:.1f}s ({total} segments)")
+        print(f"[INFO] 分片处理完成，耗时 {total_elapsed:.1f}s（{total} 个片段，{MAX_WORKERS} 并发）")
 
     def _generate_variant(
         self,
@@ -682,6 +727,25 @@ class FissionWorker:
 
         # 获取最终视频信息
         final_info = self._get_video_info(current_file)
+
+        # 清理本地临时文件释放 tmpfs 内存
+        variant_temp_files = [
+            os.path.join(temp_dir, f"variant_{variant_index}.mp4"),
+            os.path.join(temp_dir, f"variant_{variant_index}_copy.mp4"),
+            os.path.join(temp_dir, f"variant_{variant_index}_subtitled.mp4"),
+            os.path.join(temp_dir, f"variant_{variant_index}_compressed.mp4"),
+            os.path.join(temp_dir, f"subtitle_{variant_index}.ass"),
+            thumbnail_path,
+        ]
+        for tmp_file in variant_temp_files:
+            if tmp_file and os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
+
+        import gc
+        gc.collect()
 
         return {
             "variant_id": f"variant_{variant_index}",
@@ -1052,23 +1116,39 @@ class FissionWorker:
         print(f"[DEBUG] Running optimized ffmpeg command")
         print(f"[DEBUG] Command: {' '.join(cmd[:10])}...")  # 只打印前10个参数
 
-        # 使用 Popen 实时输出进度，设置 180 秒超时
+        # 使用 Popen + 后台线程读取 stderr，避免 pipe buffer 满导致死锁
         import time
+        import threading
         start_time = time.time()
         timeout_seconds = 600  # 10 分钟超时（长视频+GIF 贴纸处理较慢）
 
         process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True
         )
+
+        # 后台线程持续消费 stderr，防止 pipe buffer 写满导致 ffmpeg 阻塞
+        stderr_chunks = []
+        def _drain_stderr():
+            try:
+                for line in iter(process.stderr.readline, ''):
+                    stderr_chunks.append(line)
+            except ValueError:
+                pass
+            finally:
+                process.stderr.close()
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
 
         # 等待进程完成，定期检查超时
         while process.poll() is None:
             elapsed = time.time() - start_time
             if elapsed > timeout_seconds:
                 process.kill()
+                process.wait()
                 raise Exception(f"FFmpeg timeout after {timeout_seconds}s")
 
             # 每 30 秒输出一次进度
@@ -1077,7 +1157,8 @@ class FissionWorker:
 
             time.sleep(1)
 
-        stdout, stderr = process.communicate()
+        stderr_thread.join(timeout=5)
+        stderr = "".join(stderr_chunks)
         elapsed = time.time() - start_time
 
         if process.returncode != 0:
