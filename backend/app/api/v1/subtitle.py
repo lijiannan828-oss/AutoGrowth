@@ -278,6 +278,77 @@ async def upload_video(
         )
 
 
+@router.post("/upload-url", summary="获取视频上传签名URL（支持大文件）")
+def get_upload_url(
+    payload: dict,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """生成视频上传的签名URL，客户端直传GCS，绕过 Cloud Run 请求体限制"""
+    from google.cloud import storage as gcs_storage
+    from app.services.subtitle_video_metadata_service import SubtitleVideoMetadataService
+    import datetime as dt
+
+    filename = payload.get("filename", "video.mp4")
+    content_type = payload.get("content_type", "video/mp4")
+    display_name = payload.get("display_name", "")
+    file_size = payload.get("file_size", 0)
+
+    # 生成唯一文件名
+    file_ext = filename.split(".")[-1] if "." in filename else "mp4"
+    unique_filename = f"{uuid.uuid4()}.{file_ext}"
+
+    # GCS 路径
+    bucket_name = settings.subtitle_bucket
+    blob_name = f"vigloo-subtitle-uploads/uploads/{current_user.user_id}/{unique_filename}"
+    gcs_path = f"gs://{bucket_name}/{blob_name}"
+
+    try:
+        storage_client = gcs_storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+
+        # 生成签名URL（有效期15分钟）
+        upload_url = blob.generate_signed_url(
+            version="v4",
+            expiration=dt.timedelta(minutes=15),
+            method="PUT",
+            content_type=content_type,
+        )
+
+        # 预创建 Firestore 元数据
+        if not display_name or not display_name.strip():
+            display_name = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+        metadata_service = SubtitleVideoMetadataService()
+        video_id = metadata_service.create_video_metadata(
+            user_id=current_user.user_id,
+            gcs_path=gcs_path,
+            gcs_bucket=bucket_name,
+            gcs_blob_name=blob_name,
+            display_name=display_name.strip(),
+            original_filename=filename,
+            file_size=file_size,
+            content_type=content_type,
+            file_extension=file_ext,
+        )
+
+        return {
+            "upload_url": upload_url,
+            "gcs_path": gcs_path,
+            "video_id": video_id,
+            "filename": unique_filename,
+            "display_name": display_name.strip(),
+            "original_filename": filename,
+            "expires_in": 900,
+        }
+    except Exception as e:
+        logger.error(f"生成字幕上传签名URL失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"生成上传URL失败: {str(e)}",
+        )
+
+
 @router.patch("/videos/{video_id}", summary="重命名视频")
 def rename_video(
     video_id: str,

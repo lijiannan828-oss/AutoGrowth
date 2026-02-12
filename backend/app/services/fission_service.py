@@ -129,7 +129,7 @@ class FissionService:
         total = len(all_docs)
 
         now = datetime.now(timezone.utc)
-        stale_timeout = timedelta(minutes=3)
+        stale_timeout = timedelta(hours=1)
 
         # 统计进度>=80%的任务数 + 自动标记超时任务为 FAILED
         completed_count = 0
@@ -143,7 +143,7 @@ class FissionService:
             except (ValueError, TypeError):
                 pass
 
-            # 超时检测：PROCESSING + 进度 0% + 超过 3 分钟未更新 → 自动标记 FAILED
+            # 超时检测：PROCESSING + 进度 0% + 超过 1 小时未更新 → 自动标记 FAILED
             if data.get("status") == "PROCESSING" and int(data.get("progress", 0)) == 0:
                 updated_at = data.get("updated_at")
                 if updated_at and hasattr(updated_at, "timestamp"):
@@ -152,12 +152,12 @@ class FissionService:
                         try:
                             doc.reference.update({
                                 "status": "FAILED",
-                                "error_message": "处理超时：任务启动超过3分钟仍无进度，已自动标记失败",
+                                "error_message": "处理超时：任务启动超过1小时仍无进度，已自动标记失败",
                                 "updated_at": SERVER_TIMESTAMP,
                             })
                             overridden[doc.id] = {
                                 "status": "FAILED",
-                                "error_message": "处理超时：任务启动超过3分钟仍无进度，已自动标记失败",
+                                "error_message": "处理超时：任务启动超过1小时仍无进度，已自动标记失败",
                             }
                         except Exception as e:
                             print(f"[WARN] 自动标记超时任务失败: {doc.id}: {e}")
