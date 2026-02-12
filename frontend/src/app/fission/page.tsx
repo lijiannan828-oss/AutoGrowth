@@ -149,6 +149,12 @@ export default function FissionPage() {
   const [renamingVideoId, setRenamingVideoId] = useState<string | null>(null);
   const [newDisplayName, setNewDisplayName] = useState('');
 
+  // 视频搜索和排序状态
+  const [videoSearch, setVideoSearch] = useState('');
+  const [videoSortBy, setVideoSortBy] = useState<'name' | 'time'>('name');
+  const [videoDropdownOpen, setVideoDropdownOpen] = useState(false);
+  const videoDropdownRef = useRef<HTMLDivElement>(null);
+
   // 图片贴纸选择器状态
   const [isImageStickerPickerOpen, setIsImageStickerPickerOpen] = useState(false);
   const [currentStickerTransformIndex, setCurrentStickerTransformIndex] = useState<number | null>(null);
@@ -170,6 +176,17 @@ export default function FissionPage() {
     const interval = setInterval(loadJobs, 5000); // 每5秒刷新
     return () => clearInterval(interval);
   }, [currentPage, pageSize, authLoading, user]);
+
+  // 点击外部关闭视频下拉栏
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (videoDropdownRef.current && !videoDropdownRef.current.contains(e.target as Node)) {
+        setVideoDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // 追踪 PROCESSING 状态下 0% 进度的起始时间
   useEffect(() => {
@@ -396,6 +413,24 @@ export default function FissionPage() {
       return;
     }
 
+    // 检查是否已存在同名文件
+    const existingVideo = gcsVideos.find(
+      (v) => v.original_filename === selectedFile.name
+    );
+    if (existingVideo) {
+      alert(`上传失败：文件「${selectedFile.name}」已存在，已为您自动定位到该视频`);
+      // 自动切换到"选择已有视频"并选中该文件
+      setSourceMode('select');
+      setSourceVideo(existingVideo.gcs_path);
+      setVideoDropdownOpen(true);
+      setVideoSearch(existingVideo.display_name || existingVideo.name || '');
+      // 清空上传状态
+      setSelectedFile(null);
+      setVideoDisplayName('');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
     setUploading(true);
     setUploadProgress(0);
 
@@ -538,19 +573,91 @@ export default function FissionPage() {
                   {/* 选择已有视频 */}
                   {sourceMode === 'select' && (
                     <div>
-                      <select
-                        value={sourceVideo}
-                        onChange={(e) => setSourceVideo(e.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg"
-                      >
-                        <option value="">-- 选择已有视频 --</option>
-                        {gcsVideos.map((video, idx) => (
-                          <option key={video.video_id || idx} value={video.gcs_path}>
-                            {video.display_name || video.name}
-                            {video.display_name && video.original_filename && ` (${video.original_filename})`}
-                          </option>
-                        ))}
-                      </select>
+                      <div ref={videoDropdownRef} className="relative">
+                        {/* 选中显示 / 触发按钮 */}
+                        <button
+                          type="button"
+                          onClick={() => setVideoDropdownOpen(!videoDropdownOpen)}
+                          className="w-full px-3 py-2 border rounded-lg bg-white text-left flex items-center justify-between"
+                        >
+                          <span className={sourceVideo ? 'text-gray-900 truncate' : 'text-gray-400'}>
+                            {sourceVideo
+                              ? (gcsVideos.find(v => v.gcs_path === sourceVideo)?.display_name
+                                || gcsVideos.find(v => v.gcs_path === sourceVideo)?.name
+                                || sourceVideo)
+                              : '-- 选择已有视频 --'}
+                          </span>
+                          <span className="text-gray-400 ml-2 flex-shrink-0">{videoDropdownOpen ? '▲' : '▼'}</span>
+                        </button>
+
+                        {/* 下拉面板 */}
+                        {videoDropdownOpen && (
+                          <div className="absolute z-50 mt-1 w-full bg-white border rounded-lg shadow-lg max-h-80 flex flex-col">
+                            {/* 搜索栏 + 排序 */}
+                            <div className="p-2 border-b flex gap-2 items-center">
+                              <input
+                                type="text"
+                                value={videoSearch}
+                                onChange={(e) => setVideoSearch(e.target.value)}
+                                placeholder="搜索视频名称..."
+                                className="flex-1 px-2 py-1.5 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                                autoFocus
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); setVideoSortBy(videoSortBy === 'name' ? 'time' : 'name'); }}
+                                className={`px-2 py-1.5 rounded text-xs font-medium whitespace-nowrap border transition-colors ${videoSortBy === 'name' ? 'bg-indigo-50 text-indigo-700 border-indigo-300' : 'bg-amber-50 text-amber-700 border-amber-300'}`}
+                                title={videoSortBy === 'name' ? '当前：按名称排序，点击切换' : '当前：按上传时间排序，点击切换'}
+                              >
+                                {videoSortBy === 'name' ? '🔤 名称' : '🕐 时间'}
+                              </button>
+                            </div>
+                            {/* 视频列表 */}
+                            <div className="overflow-y-auto flex-1">
+                              {(() => {
+                                const filtered = gcsVideos.filter(v => {
+                                  if (!videoSearch.trim()) return true;
+                                  const keyword = videoSearch.trim().toLowerCase();
+                                  const name = (v.display_name || v.name || '').toLowerCase();
+                                  const original = (v.original_filename || '').toLowerCase();
+                                  return name.includes(keyword) || original.includes(keyword);
+                                });
+                                const sorted = [...filtered].sort((a, b) => {
+                                  if (videoSortBy === 'time') {
+                                    const ta = a.uploaded_at || a.created_at || '';
+                                    const tb = b.uploaded_at || b.created_at || '';
+                                    return tb.localeCompare(ta); // 最新在前
+                                  }
+                                  const na = (a.display_name || a.name || '').toLowerCase();
+                                  const nb = (b.display_name || b.name || '').toLowerCase();
+                                  return na.localeCompare(nb, 'zh-CN');
+                                });
+                                if (sorted.length === 0) {
+                                  return <div className="px-3 py-4 text-sm text-gray-400 text-center">无匹配视频</div>;
+                                }
+                                return sorted.map((video, idx) => (
+                                  <button
+                                    key={video.video_id || idx}
+                                    type="button"
+                                    onClick={() => {
+                                      setSourceVideo(video.gcs_path);
+                                      setVideoDropdownOpen(false);
+                                      setVideoSearch('');
+                                    }}
+                                    className={`w-full text-left px-3 py-2 text-sm hover:bg-indigo-50 transition-colors ${sourceVideo === video.gcs_path ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-700'}`}
+                                  >
+                                    {video.display_name || video.name}
+                                    {video.display_name && video.original_filename && (
+                                      <span className="text-gray-400 ml-1">({video.original_filename})</span>
+                                    )}
+                                  </button>
+                                ));
+                              })()}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                       {sourceVideo && (
                         <div className="mt-2">
                           {renamingVideoId ? (
@@ -1052,6 +1159,38 @@ export default function FissionPage() {
                             <span>{detail.created_at ? new Date(detail.created_at).toLocaleString('zh-CN') : '-'}</span>
                           </div>
                         </div>
+                        {/* 任务配置信息 */}
+                        {detail.transforms && detail.transforms.length > 0 && (
+                          <div className="mt-3 pt-3 border-t border-gray-200">
+                            <span className="text-gray-600 text-sm font-medium">任务配置：</span>
+                            <div className="flex flex-wrap gap-2 mt-1">
+                              {detail.transforms.map((t: any, i: number) => {
+                                const typeLabels: Record<string, string> = {
+                                  filter: '滤镜',
+                                  duration_adjust: '时长调整',
+                                  frame_shuffle: '抽帧重组',
+                                  sticker_overlay: '贴纸叠加',
+                                };
+                                const label = typeLabels[t.type] || t.type;
+                                let paramText = '';
+                                if (t.type === 'filter' && t.params?.preset) {
+                                  const presetLabels: Record<string, string> = { warm: '暖色调', cool: '冷色调', vintage: '复古', high_contrast: '高对比度', soft: '柔和' };
+                                  paramText = presetLabels[t.params.preset] || t.params.preset;
+                                } else if (t.type === 'frame_shuffle' && t.params?.intensity != null) {
+                                  paramText = `强度 ${t.params.intensity}`;
+                                } else if (t.type === 'sticker_overlay') {
+                                  paramText = t.params?.text || (t.params?.image_path ? '图片' : '');
+                                }
+                                return (
+                                  <span key={i} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs ${t.enabled ? 'bg-indigo-50 text-indigo-700' : 'bg-gray-100 text-gray-400 line-through'}`}>
+                                    {label}{paramText ? `(${paramText})` : ''}
+                                  </span>
+                                );
+                              })}
+                              <span className="text-xs text-gray-400 ml-1">变体数: {detail.variant_count}</span>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {detail.variants && detail.variants.length > 0 && (
