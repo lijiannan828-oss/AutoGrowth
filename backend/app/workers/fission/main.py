@@ -364,7 +364,7 @@ class FissionWorker:
             return [input_path]
 
         num_segments_est = int(duration / segment_duration) + 1
-        print(f"[INFO] Splitting {duration:.1f}s video into ~{num_segments_est} segments (single ffmpeg call)")
+        print(f"[INFO] Splitting {duration:.1f}s video into {num_segments_est} segments")
 
         # 使用 segment muxer 一次性切片，比循环调用 N 次 ffmpeg 快得多
         pattern = os.path.join(temp_dir, "segment_%03d.mp4")
@@ -387,7 +387,7 @@ class FissionWorker:
         segment_files = sorted(glob_mod.glob(os.path.join(temp_dir, "segment_*.mp4")))
 
         elapsed = time.time() - start_time
-        print(f"[INFO] Split completed in {elapsed:.1f}s, {len(segment_files)} segments created (single call)")
+        print(f"[INFO] Split completed in {elapsed:.1f}s, {len(segment_files)} segments created")
         return segment_files
 
     def _concat_segments(self, segment_files: List[str], output_path: str) -> None:
@@ -441,27 +441,21 @@ class FissionWorker:
         temp_dir: str,
         variant_index: int
     ) -> None:
-        """分片并行处理长视频（性能优化版）
-
-        并行处理 + 分批合并，兼顾速度和 tmpfs 内存占用。
-        Cloud Run 的 /tmp 是 tmpfs（内存文件系统），通过分批合并控制内存。
+        """分片并行处理长视频
 
         策略：
         1. 切片（segment muxer，单次 ffmpeg 调用）
-        2. 每批 BATCH_SIZE 个片段，用 ThreadPoolExecutor 并行处理
-        3. 每批处理完做一次中间合并，释放已处理片段文件
-        4. 最终合并所有中间文件
+        2. 全量并行处理所有片段（ThreadPoolExecutor）
+        3. 处理完一次性合并
         """
         import time
         import gc
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total_start = time.time()
-        # 可通过环境变量调整并发数，默认 2（Cloud Run tmpfs 内存有限，保守起见）
-        MAX_WORKERS = int(os.environ.get("FISSION_PARALLEL_SEGMENTS", "2"))
-        BATCH_SIZE = MAX_WORKERS * 3  # 每批处理量 = 并发数 × 3
+        MAX_WORKERS = int(os.environ.get("FISSION_PARALLEL_SEGMENTS", "4"))
 
-        # 根据视频时长动态调整切片大小，减少 ffmpeg 调用次数
+        # 根据视频时长动态调整切片大小
         video_info = self._get_video_info(input_path)
         duration = video_info.get("duration", 0)
         if duration > 3600:
@@ -473,15 +467,15 @@ class FissionWorker:
         segment_files = self._split_video(input_path, temp_dir, segment_duration=seg_duration)
 
         if len(segment_files) == 1:
-            # 不需要分片，直接处理
             self._apply_transforms_optimized(input_path, output_path, video_filters, audio_filters)
             return
 
         total = len(segment_files)
-        print(f"[INFO] 并行处理 {total} 个片段（{MAX_WORKERS} 并发，每段约 {seg_duration}s），每 {BATCH_SIZE} 个片段中间合并一次")
+        print(f"[INFO] Processing {total} segments with {MAX_WORKERS} workers")
 
         def _process_one_segment(seg_idx: int, seg_path: str) -> str:
             """处理单个片段，返回输出路径"""
+            print(f"[INFO] Processing segment {seg_idx}/{total}")
             output_seg = os.path.join(temp_dir, f"processed_{variant_index}_{seg_idx:03d}.mp4")
             try:
                 self._apply_transforms_optimized(seg_path, output_seg, video_filters, audio_filters)
@@ -491,59 +485,36 @@ class FissionWorker:
                     os.remove(seg_path)
             return output_seg
 
-        # 2. 分批并行处理 + 中间合并
-        intermediate_files = []
+        # 全量并行处理所有片段
+        results = {}
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(_process_one_segment, idx, path): idx
+                for idx, path in enumerate(segment_files)
+            }
+            for future in as_completed(futures):
+                seg_idx = futures[future]
+                try:
+                    output_seg = future.result()
+                    results[seg_idx] = output_seg
+                except Exception as e:
+                    print(f"[ERROR] Segment {seg_idx}/{total} failed: {e}")
+                    raise
 
-        for batch_start in range(0, total, BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE, total)
-            batch_items = [(i, segment_files[i]) for i in range(batch_start, batch_end)]
-            batch_results = {}
+        # 按索引排序，保证合并顺序正确
+        processed_files = [results[i] for i in sorted(results.keys())]
 
-            print(f"[INFO] 开始处理批次 {batch_start//BATCH_SIZE + 1}（片段 {batch_start+1}-{batch_end}/{total}）")
+        # 一次性合并所有片段
+        self._concat_segments(processed_files, output_path)
 
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = {
-                    executor.submit(_process_one_segment, idx, path): idx
-                    for idx, path in batch_items
-                }
-                for future in as_completed(futures):
-                    seg_idx = futures[future]
-                    try:
-                        output_seg = future.result()
-                        batch_results[seg_idx] = output_seg
-                        print(f"[INFO] 片段 {seg_idx+1}/{total} 处理完成")
-                    except Exception as e:
-                        print(f"[ERROR] 片段 {seg_idx+1}/{total} 处理失败: {e}")
-                        raise
-
-            # 按索引排序，保证合并顺序正确
-            batch_processed = [batch_results[i] for i in sorted(batch_results.keys())]
-
-            # 中间合并
-            batch_idx = len(intermediate_files)
-            intermediate_path = os.path.join(temp_dir, f"intermediate_{variant_index}_{batch_idx:03d}.mp4")
-            self._concat_segments(batch_processed, intermediate_path)
-
-            # 删除当前批次的已处理片段文件
-            for seg in batch_processed:
-                if os.path.exists(seg):
-                    os.remove(seg)
-
-            intermediate_files.append(intermediate_path)
-            print(f"[INFO] 中间合并完成（批次 {batch_idx+1}），已释放 {len(batch_processed)} 个片段文件")
-            gc.collect()
-
-        # 3. 最终合并所有中间文件
-        if len(intermediate_files) == 1:
-            os.rename(intermediate_files[0], output_path)
-        else:
-            self._concat_segments(intermediate_files, output_path)
-            for f in intermediate_files:
-                if os.path.exists(f):
-                    os.remove(f)
+        # 清理已处理片段文件
+        for seg in processed_files:
+            if os.path.exists(seg):
+                os.remove(seg)
+        gc.collect()
 
         total_elapsed = time.time() - total_start
-        print(f"[INFO] 分片处理完成，耗时 {total_elapsed:.1f}s（{total} 个片段，{MAX_WORKERS} 并发）")
+        print(f"[INFO] Segmented processing completed in {total_elapsed:.1f}s ({total} segments, {MAX_WORKERS} workers)")
 
     def _generate_variant(
         self,
