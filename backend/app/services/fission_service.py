@@ -139,6 +139,16 @@ class FissionService:
         all_docs = list(query.stream())
         total = len(all_docs)
 
+        # 统计进度>=80%的任务数（兼容 progress 为字符串的情况）
+        completed_count = 0
+        for doc in all_docs:
+            try:
+                p = (doc.to_dict() or {}).get("progress", 0)
+                if int(p) >= 80:
+                    completed_count += 1
+            except (ValueError, TypeError):
+                pass
+
         # 分页
         offset = (page - 1) * page_size
         paginated_docs = all_docs[offset:offset + page_size]
@@ -155,10 +165,11 @@ class FissionService:
                     progress=data.get("progress", 0),
                     created_at=data.get("created_at"),
                     created_by=data.get("created_by"),
+                    error_message=data.get("error_message"),
                 )
             )
 
-        return jobs, total
+        return jobs, total, completed_count
 
     def get_fission_job(self, job_id: str) -> Optional[FissionJobDetail]:
         """获取裂变任务详情"""
@@ -276,6 +287,44 @@ class FissionService:
         except Exception as e:
             print(f"[ERROR] Failed to generate download URL: {e}")
             return None
+
+    def retry_fission_job(self, job_id: str) -> bool:
+        """重试失败的裂变任务：重置状态并重新触发 Worker"""
+        doc_ref = self._firestore.collection(self._jobs_collection).document(job_id)
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            return False
+
+        data = doc.to_dict() or {}
+        status = data.get("status", "")
+
+        if status not in ["FAILED", "QUEUED"]:
+            return False
+
+        variant_count = data.get("variant_count", 5)
+        if variant_count <= 5:
+            task_count = 1
+        elif variant_count <= 10:
+            task_count = 2
+        else:
+            task_count = min(4, variant_count)
+
+        doc_ref.update({
+            "status": "QUEUED",
+            "progress": 0,
+            "progress_text": "任务已重置，等待处理",
+            "error_message": None,
+            "variants": [],
+            "updated_at": SERVER_TIMESTAMP,
+        })
+
+        try:
+            self._trigger_fission_worker(job_id, task_count)
+        except Exception as e:
+            print(f"[WARNING] Retry trigger failed for job {job_id}: {e}")
+
+        return True
 
     def cancel_fission_job(self, job_id: str) -> bool:
         """取消裂变任务"""

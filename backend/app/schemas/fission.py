@@ -111,12 +111,14 @@ class FissionJobListItem(BaseModel):
     progress: int = 0
     created_at: Optional[datetime] = None
     created_by: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class FissionJobsListResponse(BaseModel):
     """裂变任务列表响应"""
     jobs: List[FissionJobListItem]
     total: int
+    completed_count: int = 0
 
 
 # ==================== 贴纸素材模型 ====================

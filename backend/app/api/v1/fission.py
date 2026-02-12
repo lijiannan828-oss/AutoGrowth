@@ -72,13 +72,13 @@ def list_fission_jobs(
     """获取裂变任务列表（支持分页）"""
     try:
         service = FissionService()
-        jobs, total = service.list_fission_jobs(
+        jobs, total, completed_count = service.list_fission_jobs(
             status=job_status,
             drama_name=drama_name,
             page=page,
             page_size=page_size,
         )
-        return FissionJobsListResponse(jobs=jobs, total=total)
+        return FissionJobsListResponse(jobs=jobs, total=total, completed_count=completed_count)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -123,6 +123,25 @@ def cancel_fission_job(
             detail="无法取消任务（可能已完成或不存在）",
         )
     return {"message": "任务已取消", "job_id": job_id}
+
+
+@router.post(
+    "/jobs/{job_id}/retry",
+    summary="重试裂变任务",
+)
+def retry_fission_job(
+    job_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """重试失败或排队中的裂变任务"""
+    service = FissionService()
+    success = service.retry_fission_job(job_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="无法重试任务（可能正在处理中、已完成或不存在）",
+        )
+    return {"message": "任务已重新提交", "job_id": job_id}
 
 
 @router.get(
@@ -187,59 +206,46 @@ def list_videos(
         bucket_name = settings.fission_upload_bucket or "vigloo-fission-uploads"
         bucket = storage_client.bucket(bucket_name)
 
-        # 如果用户已登录，优先从 Firestore 读取元数据
+        # 如果用户已登录，加载 Firestore 元数据用于补充 display_name
+        metadata_map = {}
         if current_user:
             metadata_service = VideoMetadataService()
             metadata_videos = metadata_service.list_user_videos(current_user.user_id)
-
-            # 转换为响应格式
-            videos = []
             for meta in metadata_videos:
+                gcs_path = meta.get("gcs_path", "")
+                if gcs_path:
+                    metadata_map[gcs_path] = meta
+
+        # 始终从 GCS 桶列出全部视频
+        videos = []
+        for blob in bucket.list_blobs():
+            if blob.name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
+                gcs_path = f"gs://{bucket_name}/{blob.name}"
+                meta = metadata_map.get(gcs_path, {})
+
                 # 处理 Firestore Timestamp
-                updated_at = meta.get("updated_at")
                 updated_str = None
+                updated_at = meta.get("updated_at") if meta else None
                 if updated_at:
-                    # Firestore Timestamp 有 _seconds 属性
                     if hasattr(updated_at, '_seconds'):
                         from datetime import datetime
                         updated_str = datetime.fromtimestamp(updated_at._seconds).isoformat()
                     elif hasattr(updated_at, 'isoformat'):
                         updated_str = updated_at.isoformat()
+                elif blob.updated:
+                    updated_str = blob.updated.isoformat()
 
-                blob_name = meta.get("gcs_blob_name", "")
                 videos.append({
-                    "video_id": meta.get("video_id", ""),
-                    "name": blob_name.split("/")[-1] if blob_name else "",
+                    "video_id": meta.get("video_id", blob.name),
+                    "name": blob.name.split('/')[-1],
                     "display_name": meta.get("display_name"),
                     "original_filename": meta.get("original_filename"),
-                    "gcs_path": meta.get("gcs_path", ""),
-                    "size": meta.get("file_size", 0),
+                    "gcs_path": gcs_path,
+                    "size": meta.get("file_size") or blob.size or 0,
                     "updated": updated_str,
                 })
 
-            # 如果有元数据，直接返回
-            if videos:
-                return {"videos": videos}
-
-        # 兼容模式：从 GCS 直接读取（用于旧数据或未登录用户）
-        videos = []
-        # 限制列出的文件数量，避免超时
-        for blob in bucket.list_blobs(max_results=max_results * 2):
-            if blob.name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
-                videos.append({
-                    "video_id": blob.name,  # 使用 blob name 作为临时 ID
-                    "name": blob.name.split('/')[-1],
-                    "display_name": None,  # 旧数据没有显示名称
-                    "original_filename": None,
-                    "gcs_path": f"gs://{bucket_name}/{blob.name}",
-                    "size": blob.size,
-                    "updated": blob.updated.isoformat() if blob.updated else None,
-                })
-                # 达到视频数量限制后停止
-                if len(videos) >= max_results:
-                    break
-
-        return {"videos": videos}
+        return {"videos": videos, "total": len(videos)}
     except Exception as e:
         logger.error(f"获取视频列表失败: {e}", exc_info=True)
         raise HTTPException(

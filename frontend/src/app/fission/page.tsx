@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import apiClient from '@/lib/api-client';
+import { useAuthContext } from '@/context/AuthContext';
 import { MultiStickerEditor, StickerData } from '@/components/sticker/SimpleStickerEditor';
 import ImageStickerPicker from '@/components/sticker/ImageStickerPicker';
 import { getRandomStickerPath } from '@/lib/sticker-config';
@@ -106,6 +107,7 @@ const generateRandomSticker = (): StickerData => {
 };
 
 export default function FissionPage() {
+  const { user, loading: authLoading } = useAuthContext();
   const [sourceVideo, setSourceVideo] = useState('');
   const [dramaName, setDramaName] = useState('');
   const [variantCount, setVariantCount] = useState(5);
@@ -137,6 +139,9 @@ export default function FissionPage() {
   const [videoDescription, setVideoDescription] = useState('');
   const [inputMode, setInputMode] = useState<'upload' | 'text'>('upload'); // 输入模式：上传或文字描述
 
+  // 源视频选择方式
+  const [sourceMode, setSourceMode] = useState<'select' | 'upload' | 'manual'>('select');
+
   // 新增：视频显示名称状态
   const [videoDisplayName, setVideoDisplayName] = useState('');
 
@@ -152,18 +157,22 @@ export default function FissionPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [totalJobs, setTotalJobs] = useState(0);
+  const [completedCount, setCompletedCount] = useState(0);
+  const [totalVideos, setTotalVideos] = useState(0);
 
   useEffect(() => {
+    if (authLoading || !user) return;
     loadJobs();
     loadGcsVideos();
     const interval = setInterval(loadJobs, 5000); // 每5秒刷新
     return () => clearInterval(interval);
-  }, [currentPage, pageSize]);
+  }, [currentPage, pageSize, authLoading, user]);
 
   const loadGcsVideos = async () => {
     try {
       const response = await apiClient.get('/fission/videos');
       setGcsVideos(response.data.videos || []);
+      setTotalVideos(response.data.total || 0);
     } catch (error) {
       console.error('Failed to load GCS videos:', error);
     }
@@ -174,6 +183,7 @@ export default function FissionPage() {
       const response = await apiClient.get(`/fission/jobs?page=${currentPage}&page_size=${pageSize}`);
       setJobs(response.data.jobs || []);
       setTotalJobs(response.data.total || 0);
+      setCompletedCount(response.data.completed_count || 0);
     } catch (error) {
       console.error('Failed to load jobs:', error);
     }
@@ -376,8 +386,7 @@ export default function FissionPage() {
         formData.append('display_name', videoDisplayName.trim());
       }
 
-      // 模拟上传进度
-      setUploadProgress(30);
+      setUploadProgress(0);
 
       const response = await apiClient.post('/fission/upload', formData, {
         headers: {
@@ -386,8 +395,9 @@ export default function FissionPage() {
         timeout: 300000, // 5分钟超时，支持大文件上传
         onUploadProgress: (progressEvent) => {
           if (progressEvent.total) {
-            const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            setUploadProgress(percent);
+            // 客户端→服务器传输占 0~90%，服务器→GCS 上传在响应后才算100%
+            const percent = Math.round((progressEvent.loaded * 90) / progressEvent.total);
+            setUploadProgress(Math.min(percent, 90));
           }
         },
       });
@@ -454,7 +464,7 @@ export default function FissionPage() {
             <div className="text-sm text-gray-500">总任务数</div>
           </div>
           <div className="bg-white rounded-xl p-4 text-center shadow-sm">
-            <div className="text-3xl font-bold text-green-600">{jobs.filter((j) => j.status === "COMPLETED").length}</div>
+            <div className="text-3xl font-bold text-green-600">{completedCount}</div>
             <div className="text-sm text-gray-500">已完成</div>
           </div>
           <div className="bg-white rounded-xl p-4 text-center shadow-sm">
@@ -462,7 +472,7 @@ export default function FissionPage() {
             <div className="text-sm text-gray-500">处理中</div>
           </div>
           <div className="bg-white rounded-xl p-4 text-center shadow-sm">
-            <div className="text-3xl font-bold text-purple-600">{gcsVideos.length}</div>
+            <div className="text-3xl font-bold text-purple-600">{totalVideos}</div>
             <div className="text-sm text-gray-500">已上传视频</div>
           </div>
         </div>
@@ -471,100 +481,11 @@ export default function FissionPage() {
         <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
           <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">🎬 创建裂变任务</h2>
 
-          {/* 视频上传区域 */}
-          <div className="mb-6">
-            <h3 className="text-base font-medium mb-3">📹 上传视频</h3>
-            <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFileSelect} className="hidden" />
-            <div
-              onClick={() => !uploading && fileInputRef.current?.click()}
-              className={`relative p-6 rounded-xl border-2 border-dashed transition-all cursor-pointer
-                ${selectedFile
-                  ? 'border-green-400 bg-green-50/50 hover:border-green-500'
-                  : 'border-indigo-300 bg-indigo-50/30 hover:border-indigo-500 hover:bg-indigo-50/60'
-                }
-                ${uploading ? 'pointer-events-none opacity-70' : ''}
-              `}
-            >
-              {!selectedFile ? (
-                <div className="text-center">
-                  <div className="text-5xl mb-3 opacity-60">🎬</div>
-                  <p className="text-base font-medium text-gray-700">点击此处选择视频文件</p>
-                  <p className="text-sm text-gray-400 mt-1">支持 MP4、MOV、AVI、MKV 等常见视频格式</p>
-                </div>
-              ) : (
-                <div className="flex items-center gap-4">
-                  <div className="flex-shrink-0 w-12 h-12 bg-green-100 rounded-xl flex items-center justify-center text-2xl">🎥</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">{selectedFile.name}</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setSelectedFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-                    className="flex-shrink-0 text-gray-400 hover:text-red-500 transition-colors text-lg"
-                    title="移除文件"
-                  >✕</button>
-                </div>
-              )}
-            </div>
-
-            {/* 上传按钮 & 进度条 */}
-            {selectedFile && (
-              <div className="mt-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                <div className="flex items-start gap-3">
-                  <div className="flex-shrink-0 mt-1">
-                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-blue-900 mb-1">
-                      已选择: {selectedFile.name}
-                    </p>
-                    <p className="text-xs text-blue-700 mb-3">
-                      大小: {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
-                    </p>
-
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      视频显示名称
-                    </label>
-                    <input
-                      type="text"
-                      value={videoDisplayName}
-                      onChange={(e) => setVideoDisplayName(e.target.value)}
-                      placeholder="输入视频名称"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                      maxLength={100}
-                    />
-                    <p className="text-xs text-gray-500 mt-1">
-                      💡 此名称将显示在视频列表中，方便识别
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
-            {selectedFile && (
-              <div className="mt-3">
-                <button onClick={handleUpload} disabled={!selectedFile || uploading}
-                  className="w-full py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                >
-                  {uploading ? `上传中 ${uploadProgress}%` : '📤 上传视频'}
-                </button>
-              </div>
-            )}
-            {uploading && (
-              <div className="mt-3">
-                <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                  <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
-                </div>
-              </div>
-            )}
-          </div>
-
           {/* 输入模式选择 */}
           <div className="mb-4">
             <label className="block text-sm font-medium mb-2">视频输入方式</label>
             <div className="flex gap-3">
-              {([['upload', '📤 上传视频文件'], ['text', '✍️ 文字描述生成']] as const).map(([m, label]) => (
+              {([['upload', '📤 上传视频文件'], ['text', '✍️ 文字描述生成（待开发）']] as const).map(([m, label]) => (
                 <button key={m} onClick={() => setInputMode(m as 'upload' | 'text')}
                   className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${inputMode === m ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
                 >
@@ -576,60 +497,175 @@ export default function FissionPage() {
 
           {/* 根据输入模式显示不同的输入界面 */}
           {inputMode === 'upload' ? (
-            <div className="grid grid-cols-2 gap-4 mb-4">
+            <div className="mb-4">
               <div>
-                <label className="block text-sm font-medium mb-2">源视频路径</label>
-                {gcsVideos.length > 0 && (
-                  <select
-                    value={sourceVideo}
-                    onChange={(e) => setSourceVideo(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg mb-2"
-                    disabled={uploading}
-                  >
-                    <option value="">-- 选择已有视频 --</option>
-                    {gcsVideos.map((video, idx) => (
-                      <option key={video.video_id || idx} value={video.gcs_path}>
-                        {video.display_name || video.name}
-                        {video.display_name && video.original_filename && ` (${video.original_filename})`}
-                      </option>
+                <div>
+                  <label className="block text-sm font-medium mb-2">源视频路径</label>
+                  {/* 三选项卡 */}
+                  <div className="flex gap-1 mb-3">
+                    {([['select', '📂 选择已有视频'], ['upload', '📤 上传新视频'], ['manual', '✏️ 手动输入路径']] as const).map(([m, label]) => (
+                      <button key={m} onClick={() => setSourceMode(m as 'select' | 'upload' | 'manual')}
+                        className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${sourceMode === m ? "bg-indigo-100 text-indigo-700 border border-indigo-300" : "bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100"}`}
+                      >
+                        {label}
+                      </button>
                     ))}
-                  </select>
-                )}
-                {sourceVideo && (
-                  <button
-                    onClick={() => {
-                      const video = gcsVideos.find(v => v.gcs_path === sourceVideo);
-                      if (video && video.video_id) {
-                        setRenamingVideoId(video.video_id);
-                        setNewDisplayName(video.display_name || video.name);
-                      }
-                    }}
-                    className="mt-2 text-sm text-blue-600 hover:text-blue-800"
-                  >
-                    ✏️ 重命名此视频
-                  </button>
-                )}
-                <input
-                  type="text"
-                  value={sourceVideo}
-                  onChange={(e) => setSourceVideo(e.target.value)}
-                  placeholder="gs://bucket/path/to/video.mp4 或上传视频自动填充"
-                  className="w-full px-3 py-2 border rounded-lg"
-                  readOnly={uploading}
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  💡 可以从下拉框选择已有视频、上传新视频，或手动输入GCS路径
-                </p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-2">剧集名称</label>
-                <input
-                  type="text"
-                  value={dramaName}
-                  onChange={(e) => setDramaName(e.target.value)}
-                  placeholder="输入剧集名称"
-                  className="w-full px-3 py-2 border rounded-lg"
-                />
+                  </div>
+
+                  {/* 选择已有视频 */}
+                  {sourceMode === 'select' && (
+                    <div>
+                      <select
+                        value={sourceVideo}
+                        onChange={(e) => setSourceVideo(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg"
+                      >
+                        <option value="">-- 选择已有视频 --</option>
+                        {gcsVideos.map((video, idx) => (
+                          <option key={video.video_id || idx} value={video.gcs_path}>
+                            {video.display_name || video.name}
+                            {video.display_name && video.original_filename && ` (${video.original_filename})`}
+                          </option>
+                        ))}
+                      </select>
+                      {sourceVideo && (
+                        <div className="mt-2">
+                          {renamingVideoId ? (
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={newDisplayName}
+                                onChange={(e) => setNewDisplayName(e.target.value)}
+                                className="flex-1 px-2 py-1 border rounded text-xs"
+                                maxLength={100}
+                                autoFocus
+                              />
+                              <button
+                                onClick={() => handleRename(renamingVideoId)}
+                                className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 whitespace-nowrap"
+                              >
+                                确认
+                              </button>
+                              <button
+                                onClick={() => { setRenamingVideoId(null); setNewDisplayName(''); }}
+                                className="px-2 py-1 text-gray-500 hover:text-gray-700 text-xs whitespace-nowrap"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                const video = gcsVideos.find(v => v.gcs_path === sourceVideo);
+                                if (video && video.video_id) {
+                                  setRenamingVideoId(video.video_id);
+                                  setNewDisplayName(video.display_name || video.name);
+                                }
+                              }}
+                              className="text-xs text-blue-600 hover:text-blue-800"
+                            >
+                              ✏️ 重命名此视频
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 上传新视频 */}
+                  {sourceMode === 'upload' && (
+                    <div>
+                      <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFileSelect} className="hidden" />
+                      <div
+                        onClick={() => !uploading && fileInputRef.current?.click()}
+                        className={`relative p-4 rounded-lg border-2 border-dashed transition-all cursor-pointer
+                          ${selectedFile
+                            ? 'border-green-400 bg-green-50/50 hover:border-green-500'
+                            : 'border-indigo-300 bg-indigo-50/30 hover:border-indigo-500 hover:bg-indigo-50/60'
+                          }
+                          ${uploading ? 'pointer-events-none opacity-70' : ''}
+                        `}
+                      >
+                        {!selectedFile ? (
+                          <div className="text-center py-2">
+                            <div className="text-3xl mb-2 opacity-60">🎬</div>
+                            <p className="text-sm font-medium text-gray-700">点击选择视频文件</p>
+                            <p className="text-xs text-gray-400 mt-1">支持 MP4、MOV、AVI、MKV</p>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-3">
+                            <div className="flex-shrink-0 w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center text-xl">🎥</div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-900 truncate">{selectedFile.name}</p>
+                              <p className="text-xs text-gray-500">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                            </div>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setSelectedFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+                              className="flex-shrink-0 text-gray-400 hover:text-red-500 transition-colors"
+                              title="移除文件"
+                            >✕</button>
+                          </div>
+                        )}
+                      </div>
+                      {selectedFile && (
+                        <div className="mt-3">
+                          <label className="block text-xs font-medium text-gray-700 mb-1">视频显示名称</label>
+                          <input
+                            type="text"
+                            value={videoDisplayName}
+                            onChange={(e) => setVideoDisplayName(e.target.value)}
+                            placeholder="输入视频名称（可选）"
+                            className="w-full px-3 py-1.5 border rounded-lg text-sm"
+                            maxLength={100}
+                          />
+                          <button onClick={handleUpload} disabled={!selectedFile || uploading}
+                            className="w-full mt-2 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                          >
+                            {uploading ? `上传中 ${uploadProgress}%` : '📤 上传视频'}
+                          </button>
+                        </div>
+                      )}
+                      {uploading && (
+                        <div className="mt-2">
+                          <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                            <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-1.5 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 手动输入GCS路径 */}
+                  {sourceMode === 'manual' && (
+                    <div>
+                      <input
+                        type="text"
+                        value={sourceVideo}
+                        onChange={(e) => setSourceVideo(e.target.value)}
+                        placeholder="gs://bucket/path/to/video.mp4"
+                        className="w-full px-3 py-2 border rounded-lg"
+                      />
+                      <p className="text-xs text-gray-400 mt-1">直接输入 GCS 视频路径</p>
+                    </div>
+                  )}
+
+                  {/* 当前已选路径 */}
+                  {sourceVideo && sourceMode !== 'manual' && (
+                    <p className="text-xs text-gray-500 mt-2 truncate" title={sourceVideo}>
+                      已选: {sourceVideo}
+                    </p>
+                  )}
+                </div>
+                <div className="mt-3">
+                  <label className="block text-sm font-medium mb-2">剧集名称</label>
+                  <input
+                    type="text"
+                    value={dramaName}
+                    onChange={(e) => setDramaName(e.target.value)}
+                    placeholder="输入剧集名称"
+                    className="w-full px-3 py-2 border rounded-lg"
+                  />
+                </div>
               </div>
             </div>
           ) : (
@@ -924,6 +960,21 @@ export default function FissionPage() {
                         </span>
                         <p className="text-sm text-gray-500 mt-1">{job.progress}%</p>
                       </div>
+                      {(job.status === 'FAILED' || job.status === 'QUEUED') && (
+                        <button
+                          onClick={async () => {
+                            try {
+                              await apiClient.post(`/fission/jobs/${job.job_id}/retry`);
+                              loadJobs();
+                            } catch (error: any) {
+                              alert(`重试失败: ${error.response?.data?.detail || error.message}`);
+                            }
+                          }}
+                          className="px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 text-sm"
+                        >
+                          🔄 重试
+                        </button>
+                      )}
                       <button
                         onClick={() => toggleJobDetail(job.job_id)}
                         className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
@@ -933,19 +984,19 @@ export default function FissionPage() {
                     </div>
                   </div>
 
-                  {/* 错误信息显示 */}
-                  {job.status === 'FAILED' && job.error_message && (
-                    <div className="mt-3 bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 text-sm">
-                      ❌ {job.error_message}
-                    </div>
-                  )}
-
-                  {job.status === 'PROCESSING' && (
+                  {(job.status === 'PROCESSING' || job.status === 'QUEUED') && (
                     <div className="mt-3">
                       <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                        <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all"
-                          style={{ width: `${job.progress}%` }} />
+                        {job.status === 'QUEUED' && job.progress === 0 ? (
+                          <div className="bg-gradient-to-r from-yellow-400 via-yellow-500 to-yellow-400 h-2 rounded-full animate-pulse" style={{ width: '30%' }} />
+                        ) : (
+                          <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all"
+                            style={{ width: `${Math.max(job.progress, 2)}%` }} />
+                        )}
                       </div>
+                      <p className="text-xs text-gray-500 mt-1">
+                        {job.status === 'QUEUED' ? '排队等待 Worker 启动...' : `处理中 ${job.progress}%`}
+                      </p>
                     </div>
                   )}
 
@@ -969,7 +1020,7 @@ export default function FissionPage() {
                           </div>
                           <div>
                             <span className="text-gray-600">创建时间：</span>
-                            <span>{detail.created_at ? new Date(detail.created_at._seconds * 1000).toLocaleString('zh-CN') : '-'}</span>
+                            <span>{detail.created_at ? new Date(detail.created_at).toLocaleString('zh-CN') : '-'}</span>
                           </div>
                         </div>
                       </div>
@@ -1149,39 +1200,6 @@ export default function FissionPage() {
         }}
       />
 
-      {/* 重命名对话框 */}
-      {renamingVideoId && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold mb-4">重命名视频</h3>
-            <input
-              type="text"
-              value={newDisplayName}
-              onChange={(e) => setNewDisplayName(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg mb-4"
-              maxLength={100}
-              autoFocus
-            />
-            <div className="flex gap-3 justify-end">
-              <button
-                onClick={() => {
-                  setRenamingVideoId(null);
-                  setNewDisplayName('');
-                }}
-                className="px-4 py-2 text-gray-600 hover:text-gray-800"
-              >
-                取消
-              </button>
-              <button
-                onClick={() => handleRename(renamingVideoId)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-              >
-                确认
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

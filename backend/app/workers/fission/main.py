@@ -165,26 +165,37 @@ class FissionWorker:
                 transforms = job_data["transforms"]
 
                 # 处理分配给当前任务的变体
+                failed_variants = []
                 for variant_index in my_variants:
-                    print(f"[INFO] Processing variant {variant_index}")
+                    try:
+                        print(f"[INFO] Processing variant {variant_index}")
 
-                    variant = self._generate_variant(
-                        local_source,
-                        temp_dir,
-                        variant_index,
-                        transforms,
-                        job_data,
-                        video_info
-                    )
+                        variant = self._generate_variant(
+                            local_source,
+                            temp_dir,
+                            variant_index,
+                            transforms,
+                            job_data,
+                            video_info
+                        )
 
-                    # 将变体添加到 Firestore（原子操作）
-                    self._add_variant_to_job(variant)
+                        # 将变体添加到 Firestore（原子操作）
+                        self._add_variant_to_job(variant)
 
-                    # 更新进度
-                    self._update_progress()
-                    print(f"[INFO] Variant {variant_index} completed")
+                        # 更新进度
+                        self._update_progress()
+                        print(f"[INFO] Variant {variant_index} completed")
 
-                print(f"[INFO] Task {task_index} completed all assigned variants")
+                    except Exception as variant_err:
+                        failed_variants.append(variant_index)
+                        print(f"[WARN] Variant {variant_index} failed, skipping: {variant_err}")
+                        # 仍然更新进度，让整体进度继续推进
+                        self._update_progress()
+
+                if failed_variants:
+                    print(f"[WARN] Task {task_index} had {len(failed_variants)} failed variants: {failed_variants}")
+
+                print(f"[INFO] Task {task_index} completed ({len(my_variants) - len(failed_variants)}/{len(my_variants)} succeeded)")
 
                 # 检查是否所有变体都完成了
                 self._check_and_complete_job(variant_count)
@@ -195,14 +206,26 @@ class FissionWorker:
             self._update_task_error(task_index, error_msg)
             raise
 
-    def _download_from_gcs(self, gcs_path: str, local_path: str) -> None:
-        """从 GCS 下载文件"""
+    def _download_from_gcs(self, gcs_path: str, local_path: str, max_retries: int = 3) -> None:
+        """从 GCS 下载文件（带重试）"""
+        import time
         # 解析 gs://bucket/path 格式
         path = gcs_path.replace("gs://", "")
         bucket_name, blob_name = path.split("/", 1)
         bucket = self.storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
-        blob.download_to_filename(local_path)
+
+        for attempt in range(max_retries):
+            try:
+                blob.download_to_filename(local_path)
+                return
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt  # 指数退避: 1s, 2s, 4s
+                    print(f"[WARN] GCS download failed (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise Exception(f"GCS download failed after {max_retries} attempts: {e}")
 
     def _download_sticker_from_gcs(self, sticker_path: str, temp_dir: str) -> str:
         """从 GCS 下载贴纸文件，返回本地路径"""
@@ -420,63 +443,62 @@ class FissionWorker:
         temp_dir: str,
         variant_index: int
     ) -> None:
-        """分片并行处理长视频
+        """分片串行处理长视频（内存优化版）
+
+        串行处理每个片段，处理完立即删除原始切片释放内存。
+        Cloud Run 的 /tmp 是 tmpfs（内存文件系统），减少临时文件 = 减少内存占用。
 
         1. 切片（copy模式，极快）
-        2. 并行处理每个片段
-        3. 合并（copy模式，极快）
+        2. 串行处理每个片段，处理完立即删除原始切片
+        3. 合并（copy模式，极快），合并后删除已处理片段
         """
         import time
-        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total_start = time.time()
 
-        # 1. 切片（1秒/段，60倍切片数量以提高并行处理效率和生成速度）
-        segment_files = self._split_video(input_path, temp_dir, segment_duration=1)
+        # 1. 自适应切片：目标 8-12 个切片，每片至少 15 秒
+        video_info = self._get_video_info(input_path)
+        duration = video_info.get("duration", 0)
+        target_segments = 10
+        seg_duration = max(15, int(duration / target_segments))
+        segment_files = self._split_video(input_path, temp_dir, segment_duration=seg_duration)
 
         if len(segment_files) == 1:
             # 不需要分片，直接处理
             self._apply_transforms_optimized(input_path, output_path, video_filters, audio_filters)
             return
 
-        # 2. 并行处理每个片段
+        # 2. 串行处理每个片段，处理完立即删除原始切片释放内存
+        total = len(segment_files)
+        print(f"[INFO] Processing {total} segments (each ~{seg_duration}s) sequentially to save memory")
+
         processed_segments = []
-
-        def process_segment(seg_idx: int, seg_path: str) -> str:
-            """处理单个片段"""
+        for seg_idx, seg_path in enumerate(segment_files):
             output_seg = os.path.join(temp_dir, f"processed_{variant_index}_{seg_idx:03d}.mp4")
-            print(f"[INFO] Processing segment {seg_idx}/{len(segment_files)}")
-            self._apply_transforms_optimized(seg_path, output_seg, video_filters, audio_filters)
-            return output_seg
+            print(f"[INFO] Processing segment {seg_idx+1}/{total}")
 
-        # 使用线程池并行处理（最多16个并行，配合更多切片提高处理速度）
-        max_workers = min(16, len(segment_files))
-        print(f"[INFO] Processing {len(segment_files)} segments with {max_workers} workers")
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(process_segment, i, seg): i
-                for i, seg in enumerate(segment_files)
-            }
-
-            results = {}
-            for future in as_completed(futures):
-                seg_idx = futures[future]
-                try:
-                    results[seg_idx] = future.result()
-                    print(f"[INFO] Segment {seg_idx} completed")
-                except Exception as e:
-                    print(f"[ERROR] Segment {seg_idx} failed: {e}")
-                    raise
-
-        # 按顺序排列处理后的片段
-        processed_segments = [results[i] for i in range(len(segment_files))]
+            try:
+                self._apply_transforms_optimized(seg_path, output_seg, video_filters, audio_filters)
+                processed_segments.append(output_seg)
+                print(f"[INFO] Segment {seg_idx+1}/{total} completed")
+            except Exception as e:
+                print(f"[ERROR] Segment {seg_idx+1} failed: {e}")
+                raise
+            finally:
+                # 立即删除原始切片文件释放内存
+                if seg_path != input_path and os.path.exists(seg_path):
+                    os.remove(seg_path)
 
         # 3. 合并
         self._concat_segments(processed_segments, output_path)
 
+        # 合并完成后删除所有已处理片段文件
+        for seg in processed_segments:
+            if os.path.exists(seg):
+                os.remove(seg)
+
         total_elapsed = time.time() - total_start
-        print(f"[INFO] Segmented processing completed in {total_elapsed:.1f}s")
+        print(f"[INFO] Segmented processing completed in {total_elapsed:.1f}s ({total} segments)")
 
     def _generate_variant(
         self,
@@ -613,20 +635,30 @@ class FissionWorker:
             subprocess.run(["cp", source_path, output_file], check=True)
             current_file = output_file
 
-        # 字幕生成（可选功能）
+        # 字幕生成（可选功能，带超时保护）
         enable_subtitle = job_data.get("enable_subtitle", False)
         if enable_subtitle:
             print(f"[INFO] Generating subtitle for variant {variant_index}")
             subtitle_language = job_data.get("subtitle_language", None)
             ass_path = os.path.join(temp_dir, f"subtitle_{variant_index}.ass")
 
-            if SubtitleGenerator.generate_subtitle(current_file, ass_path, subtitle_language):
-                # 烧录字幕到视频
-                subtitled_file = os.path.join(temp_dir, f"variant_{variant_index}_subtitled.mp4")
-                self._burn_subtitle(current_file, ass_path, subtitled_file)
-                current_file = subtitled_file
-                transforms_applied.append("subtitle:auto")
-                print(f"[INFO] Subtitle burned into video")
+            try:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(SubtitleGenerator.generate_subtitle, current_file, ass_path, subtitle_language)
+                    subtitle_ok = future.result(timeout=300)  # 5 分钟超时
+
+                if subtitle_ok:
+                    # 烧录字幕到视频
+                    subtitled_file = os.path.join(temp_dir, f"variant_{variant_index}_subtitled.mp4")
+                    self._burn_subtitle(current_file, ass_path, subtitled_file)
+                    current_file = subtitled_file
+                    transforms_applied.append("subtitle:auto")
+                    print(f"[INFO] Subtitle burned into video")
+            except concurrent.futures.TimeoutError:
+                print(f"[WARN] Subtitle generation timed out for variant {variant_index}, skipping subtitle")
+            except Exception as sub_err:
+                print(f"[WARN] Subtitle generation failed for variant {variant_index}: {sub_err}, skipping subtitle")
 
         # 检查文件大小
         file_size = os.path.getsize(current_file)
@@ -1023,7 +1055,7 @@ class FissionWorker:
         # 使用 Popen 实时输出进度，设置 180 秒超时
         import time
         start_time = time.time()
-        timeout_seconds = 300  # 5 分钟超时（GIF 贴纸处理较慢）
+        timeout_seconds = 600  # 10 分钟超时（长视频+GIF 贴纸处理较慢）
 
         process = subprocess.Popen(
             cmd,
