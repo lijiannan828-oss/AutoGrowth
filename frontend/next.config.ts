@@ -1,3 +1,4 @@
+// deploy trigger: 2026-02-12
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
