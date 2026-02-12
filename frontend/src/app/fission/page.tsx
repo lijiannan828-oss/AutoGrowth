@@ -153,6 +153,9 @@ export default function FissionPage() {
   const [isImageStickerPickerOpen, setIsImageStickerPickerOpen] = useState(false);
   const [currentStickerTransformIndex, setCurrentStickerTransformIndex] = useState<number | null>(null);
 
+  // 追踪 PROCESSING 状态下 0% 进度的开始时间（用于 3 分钟超时提示）
+  const processingStartTimesRef = useRef<Record<string, number>>({});
+
   // 分页状态
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -167,6 +170,26 @@ export default function FissionPage() {
     const interval = setInterval(loadJobs, 5000); // 每5秒刷新
     return () => clearInterval(interval);
   }, [currentPage, pageSize, authLoading, user]);
+
+  // 追踪 PROCESSING 状态下 0% 进度的起始时间
+  useEffect(() => {
+    const startTimes = processingStartTimesRef.current;
+    const activeJobIds = new Set<string>();
+    for (const job of jobs) {
+      if (job.status === 'PROCESSING' && job.progress === 0) {
+        activeJobIds.add(job.job_id);
+        if (!startTimes[job.job_id]) {
+          startTimes[job.job_id] = Date.now();
+        }
+      }
+    }
+    // 清理不再需要追踪的 job
+    for (const id of Object.keys(startTimes)) {
+      if (!activeJobIds.has(id)) {
+        delete startTimes[id];
+      }
+    }
+  }, [jobs]);
 
   const loadGcsVideos = async () => {
     try {
@@ -984,21 +1007,27 @@ export default function FissionPage() {
                     </div>
                   </div>
 
-                  {(job.status === 'PROCESSING' || job.status === 'QUEUED') && (
+                  {(job.status === 'PROCESSING' || job.status === 'QUEUED') && (() => {
+                    const startTime = processingStartTimesRef.current[job.job_id];
+                    const isStuck = job.status === 'PROCESSING' && job.progress === 0 && startTime && (Date.now() - startTime > 3 * 60 * 1000);
+                    return (
                     <div className="mt-3">
                       <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
                         {job.status === 'QUEUED' && job.progress === 0 ? (
                           <div className="bg-gradient-to-r from-yellow-400 via-yellow-500 to-yellow-400 h-2 rounded-full animate-pulse" style={{ width: '30%' }} />
+                        ) : isStuck ? (
+                          <div className="bg-red-400 h-2 rounded-full" style={{ width: '100%' }} />
                         ) : (
                           <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all"
                             style={{ width: `${Math.max(job.progress, 2)}%` }} />
                         )}
                       </div>
-                      <p className="text-xs text-gray-500 mt-1">
-                        {job.status === 'QUEUED' ? '排队等待 Worker 启动...' : `处理中 ${job.progress}%`}
+                      <p className={`text-xs mt-1 ${isStuck ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
+                        {job.status === 'QUEUED' ? '排队等待 Worker 启动...' : isStuck ? '处理超时：3 分钟内无进度，Worker 可能异常' : `处理中 ${job.progress}%`}
                       </p>
                     </div>
-                  )}
+                    );
+                  })()}
 
                   {/* 展开的任务详情 */}
                   {isExpanded && detail && (
@@ -1069,7 +1098,7 @@ export default function FissionPage() {
                             </button>
                           </div>
 
-                          <div className="grid grid-cols-3 gap-4">
+                          <div className="grid grid-cols-3 gap-4 max-h-[260px] overflow-y-auto pr-2">
                             {detail.variants.map((variant: Variant) => (
                               <div key={variant.variant_id} className="border rounded-xl p-4 bg-white">
                                 {variant.thumbnail_path && (
