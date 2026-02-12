@@ -1,10 +1,16 @@
 """字幕生成 API 路由
 
-所有上传的音视频文件和生成的字幕都存储在 GCS 存储桶中：
+文件上传逻辑与裂变模块一致：
+  1. POST /subtitle/upload  — 仅上传视频到 GCS + 创建 Firestore 元数据
+  2. GET  /subtitle/videos  — 列出用户已上传的视频
+  3. PATCH /subtitle/videos/{video_id} — 重命名视频
+  4. POST /subtitle/tasks   — 从已上传视频创建字幕任务
+
+存储路径:
   桶名: vigloo-fission-uploads (由 settings.subtitle_bucket 配置)
-  路径: vigloo-subtitle-uploads/uploads/{user_id}/{task_id}.mp4  (上传的音视频)
-        vigloo-subtitle-uploads/tasks/{task_id}.json              (任务元数据)
-        vigloo-subtitle-uploads/outputs/{task_id}/{lang}.srt      (生成的字幕)
+  视频: vigloo-subtitle-uploads/uploads/{user_id}/{uuid}.{ext}
+  任务: vigloo-subtitle-uploads/tasks/{task_id}.json
+  字幕: vigloo-subtitle-uploads/outputs/{task_id}/{lang}.{srt|ass}
 """
 import json
 import logging
@@ -12,19 +18,20 @@ import uuid
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import (
+    APIRouter, UploadFile, File, Form, Query,
+    HTTPException, BackgroundTasks, Depends, status,
+)
 
 from app.api.deps import get_current_user, AuthenticatedUser
-from fastapi import Depends
-
 from app.schemas.subtitle import (
-    LanguageCode,
-    SubtitleFormat,
     ProcessStatus,
     SubtitleTask,
     SubtitleTaskResponse,
     SubtitleTaskStatusResponse,
+    SubtitleVideoUploadResponse,
+    SubtitleVideoRenameRequest,
+    SubtitleCreateTaskRequest,
 )
 from app.core.config import settings
 from app.utils.gcs import (
@@ -79,6 +86,7 @@ def _save_subtitle_task_meta(task: SubtitleTask) -> None:
     except Exception as e:
         logger.warning(f"保存字幕任务元数据到GCS失败: {e}")
 
+
 # 支持的语言
 SUPPORTED_LANGUAGES = {
     "zh": "中文",
@@ -109,7 +117,238 @@ async def get_languages():
     }
 
 
-@router.get("/tasks")
+# ==================== 视频管理（与裂变模块一致） ====================
+
+
+@router.get("/videos", summary="获取用户已上传的字幕视频列表")
+def list_videos(
+    max_results: int = Query(100, ge=1, le=500),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """列出用户的字幕视频（优先从 Firestore 元数据读取，同时扫描 GCS）"""
+    from google.cloud import storage as gcs_storage
+    from app.services.subtitle_video_metadata_service import SubtitleVideoMetadataService
+
+    try:
+        storage_client = gcs_storage.Client()
+        bucket_name = settings.subtitle_bucket
+        bucket = storage_client.bucket(bucket_name)
+
+        # 从 Firestore 加载元数据
+        metadata_map: Dict[str, dict] = {}
+        metadata_service = SubtitleVideoMetadataService()
+        metadata_videos = metadata_service.list_user_videos(current_user.user_id)
+        for meta in metadata_videos:
+            gcs_path = meta.get("gcs_path", "")
+            if gcs_path:
+                metadata_map[gcs_path] = meta
+
+        # 扫描 GCS 桶中该用户的视频
+        prefix = f"vigloo-subtitle-uploads/uploads/{current_user.user_id}/"
+        videos = []
+        video_exts = ('.mp4', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.webm', '.flv')
+
+        for blob in bucket.list_blobs(prefix=prefix, max_results=max_results):
+            if blob.name.lower().endswith(video_exts):
+                gcs_path = f"gs://{bucket_name}/{blob.name}"
+                meta = metadata_map.pop(gcs_path, {})
+
+                updated_str = None
+                updated_at = meta.get("updated_at") if meta else None
+                if updated_at:
+                    if hasattr(updated_at, '_seconds'):
+                        updated_str = datetime.fromtimestamp(updated_at._seconds).isoformat()
+                    elif hasattr(updated_at, 'isoformat'):
+                        updated_str = updated_at.isoformat()
+                elif blob.updated:
+                    updated_str = blob.updated.isoformat()
+
+                videos.append({
+                    "video_id": meta.get("video_id", blob.name),
+                    "name": blob.name.split('/')[-1],
+                    "display_name": meta.get("display_name"),
+                    "original_filename": meta.get("original_filename"),
+                    "gcs_path": gcs_path,
+                    "size": meta.get("file_size") or blob.size or 0,
+                    "updated": updated_str,
+                })
+
+        # 补充 Firestore 中有但 GCS 扫描未覆盖的记录
+        for gcs_path, meta in metadata_map.items():
+            updated_at = meta.get("updated_at")
+            updated_str = None
+            if updated_at:
+                if hasattr(updated_at, '_seconds'):
+                    updated_str = datetime.fromtimestamp(updated_at._seconds).isoformat()
+                elif hasattr(updated_at, 'isoformat'):
+                    updated_str = updated_at.isoformat()
+            videos.append({
+                "video_id": meta.get("video_id", ""),
+                "name": meta.get("gcs_blob_name", "").split('/')[-1],
+                "display_name": meta.get("display_name"),
+                "original_filename": meta.get("original_filename"),
+                "gcs_path": gcs_path,
+                "size": meta.get("file_size", 0),
+                "updated": updated_str,
+            })
+
+        return {"videos": videos, "total": len(videos)}
+    except Exception as e:
+        logger.error(f"获取字幕视频列表失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取视频列表失败: {str(e)}",
+        )
+
+
+@router.post("/upload", summary="上传视频文件到GCS（仅上传，不创建任务）")
+async def upload_video(
+    file: UploadFile = File(...),
+    display_name: Optional[str] = Form(None),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """上传视频/音频文件到 GCS 并创建元数据（与裂变模块逻辑一致）"""
+    from google.cloud import storage as gcs_storage
+    from app.services.subtitle_video_metadata_service import SubtitleVideoMetadataService
+
+    # 验证文件类型
+    allowed_types = ("video/", "audio/")
+    if file.content_type and not any(file.content_type.startswith(t) for t in allowed_types):
+        # 兜底：按扩展名判断
+        allowed_exts = ('.mp4', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.webm', '.flv', '.wmv')
+        if not file.filename or not file.filename.lower().endswith(allowed_exts):
+            raise HTTPException(status_code=400, detail="只支持视频或音频文件")
+
+    try:
+        # 生成唯一文件名
+        file_ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "mp4"
+        unique_filename = f"{uuid.uuid4()}.{file_ext}"
+
+        # GCS 路径
+        bucket_name = settings.subtitle_bucket
+        blob_name = f"vigloo-subtitle-uploads/uploads/{current_user.user_id}/{unique_filename}"
+        gcs_path = f"gs://{bucket_name}/{blob_name}"
+
+        # 读取文件内容
+        content = await file.read()
+
+        # 上传到 GCS
+        storage_client = gcs_storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        content_type = file.content_type or "video/mp4"
+        blob.upload_from_string(content, content_type=content_type)
+
+        # 确定显示名称
+        if not display_name or not display_name.strip():
+            display_name = file.filename.rsplit(".", 1)[0] if file.filename and "." in file.filename else file.filename or "unknown"
+
+        # 创建 Firestore 元数据
+        metadata_service = SubtitleVideoMetadataService()
+        try:
+            video_id = metadata_service.create_video_metadata(
+                user_id=current_user.user_id,
+                gcs_path=gcs_path,
+                gcs_bucket=bucket_name,
+                gcs_blob_name=blob_name,
+                display_name=display_name.strip(),
+                original_filename=file.filename or "unknown",
+                file_size=len(content),
+                content_type=content_type,
+                file_extension=file_ext,
+            )
+        except Exception as e:
+            blob.delete()
+            raise HTTPException(status_code=500, detail=f"元数据创建失败: {str(e)}")
+
+        return SubtitleVideoUploadResponse(
+            video_id=video_id,
+            filename=unique_filename,
+            display_name=display_name.strip(),
+            original_filename=file.filename or "unknown",
+            gcs_path=gcs_path,
+            size=len(content),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"上传失败: {str(e)}",
+        )
+
+
+@router.patch("/videos/{video_id}", summary="重命名视频")
+def rename_video(
+    video_id: str,
+    payload: SubtitleVideoRenameRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """更新视频显示名称"""
+    from app.services.subtitle_video_metadata_service import SubtitleVideoMetadataService
+
+    metadata_service = SubtitleVideoMetadataService()
+    try:
+        success = metadata_service.update_display_name(
+            video_id=video_id,
+            user_id=current_user.user_id,
+            display_name=payload.display_name,
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="视频不存在")
+        return {"video_id": video_id, "display_name": payload.display_name, "message": "重命名成功"}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重命名失败: {str(e)}")
+
+
+# ==================== 字幕任务 ====================
+
+
+@router.post("/tasks", response_model=SubtitleTaskResponse, summary="从已上传视频创建字幕任务")
+async def create_task(
+    request: SubtitleCreateTaskRequest,
+    background_tasks: BackgroundTasks,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """从已上传的视频创建字幕生成任务（上传与任务创建分离）"""
+    if not request.source_video_path.startswith("gs://"):
+        raise HTTPException(status_code=400, detail="source_video_path 必须是 GCS 路径")
+
+    task_id = str(uuid.uuid4())
+
+    # 从 GCS 路径提取文件名
+    filename = request.source_video_path.split("/")[-1]
+
+    task = SubtitleTask(
+        task_id=task_id,
+        filename=filename,
+        status=ProcessStatus.PENDING,
+        source_language=request.source_language,
+        target_languages=request.target_languages,
+        created_by=current_user.user_id,
+        created_at=datetime.now(),
+    )
+    tasks[task_id] = task
+    _save_subtitle_task_meta(task)
+
+    background_tasks.add_task(
+        _process_subtitle_task, task_id, request.source_video_path,
+        request.source_language, request.target_languages,
+    )
+    logger.info(f"字幕任务已创建: {task_id}, 文件: {request.source_video_path}")
+
+    return SubtitleTaskResponse(
+        task_id=task_id,
+        message="任务已创建，正在处理中",
+        status=ProcessStatus.PENDING,
+    )
+
+
+@router.get("/tasks", summary="获取当前用户的所有任务")
 async def get_all_tasks(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
@@ -131,62 +370,7 @@ async def get_task_status(
     return SubtitleTaskStatusResponse(task=tasks[task_id])
 
 
-@router.post("/upload", response_model=SubtitleTaskResponse)
-async def upload_file(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    target_languages: str = Form(...),
-    source_language: Optional[str] = Form(None),
-    current_user: AuthenticatedUser = Depends(get_current_user),
-):
-    """上传音视频文件并创建字幕生成任务（文件存储到GCS）"""
-    try:
-        target_langs = json.loads(target_languages)
-    except json.JSONDecodeError:
-        target_langs = [target_languages]
-
-    task_id = str(uuid.uuid4())
-
-    # 读取文件内容
-    content = await file.read()
-
-    # 上传到GCS
-    try:
-        from pathlib import Path as _Path
-        file_ext = _Path(file.filename).suffix.lower() if file.filename else ".mp4"
-        blob_name = f"vigloo-subtitle-uploads/uploads/{current_user.user_id}/{task_id}{file_ext}"
-        bucket_name = settings.subtitle_bucket
-        gcs_path = f"gs://{bucket_name}/{blob_name}"
-        upload_bytes(blob_name, content, file.content_type or "video/mp4", bucket_name=bucket_name)
-
-        logger.info(f"字幕文件已上传到GCS: {gcs_path}")
-    except Exception as e:
-        logger.error(f"上传文件到GCS失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"上传文件失败: {str(e)}")
-
-    task = SubtitleTask(
-        task_id=task_id,
-        filename=file.filename or "unknown",
-        status=ProcessStatus.PENDING,
-        source_language=source_language,
-        target_languages=target_langs,
-        created_by=current_user.user_id,
-        created_at=datetime.now(),
-    )
-    tasks[task_id] = task
-    _save_subtitle_task_meta(task)  # 持久化到 GCS
-
-    # 后台处理字幕任务
-    background_tasks.add_task(
-        _process_subtitle_task, task_id, gcs_path, source_language, target_langs
-    )
-    logger.info(f"字幕任务已创建: {task_id}, 文件: {gcs_path}")
-
-    return SubtitleTaskResponse(
-        task_id=task_id,
-        message="任务已创建，正在处理中",
-        status=ProcessStatus.PENDING,
-    )
+# ==================== 字幕处理 ====================
 
 
 def _generate_srt_content(segments: list) -> str:
@@ -328,7 +512,7 @@ async def download_subtitle(
     subtitle_format: str,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """获取字幕文件的签名下载链接（有效期1小时，与裂变模块一致）"""
+    """获取字幕文件的签名下载链接（有效期1小时）"""
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
 
@@ -336,7 +520,6 @@ async def download_subtitle(
     if task.status != ProcessStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="任务尚未完成")
 
-    # 验证格式
     if subtitle_format not in ("srt", "ass"):
         raise HTTPException(status_code=400, detail="不支持的字幕格式，仅支持 srt/ass")
 

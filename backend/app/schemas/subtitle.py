@@ -97,3 +97,27 @@ class SubtitleTaskResponse(BaseModel):
 class SubtitleTaskStatusResponse(BaseModel):
     """任务状态响应"""
     task: SubtitleTask
+
+
+# ==================== 视频上传相关模型（与裂变模块一致） ====================
+
+class SubtitleVideoUploadResponse(BaseModel):
+    """视频上传响应"""
+    video_id: str
+    filename: str
+    display_name: str
+    original_filename: str
+    gcs_path: str
+    size: int
+
+
+class SubtitleVideoRenameRequest(BaseModel):
+    """视频重命名请求"""
+    display_name: str = Field(..., min_length=1, max_length=100)
+
+
+class SubtitleCreateTaskRequest(BaseModel):
+    """创建字幕任务请求（从已上传视频创建）"""
+    source_video_path: str = Field(..., description="源视频 GCS 路径")
+    source_language: Optional[str] = Field(None, description="源语言代码，留空自动识别")
+    target_languages: List[str] = Field(..., min_length=1, description="目标翻译语言列表")

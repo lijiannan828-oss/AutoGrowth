@@ -136,6 +136,7 @@ class FissionWorker:
             job_data = job_doc.to_dict()
             variant_count = job_data["variant_count"]
             self.variant_count = variant_count
+            self._task_index = task_index
 
             # 计算当前任务要处理的变体索引
             my_variants = []
@@ -1245,31 +1246,53 @@ class FissionWorker:
         })
 
     def _update_segment_progress(self, variant_index: int, completed_segments: int, total_segments: int) -> None:
-        """更新分片级进度"""
+        """更新分片级进度 - 支持多 task 并行聚合"""
         try:
             variant_count = getattr(self, 'variant_count', 1)
-            job_doc = self.job_ref.get()
-            if job_doc.exists:
-                completed_variants = len(job_doc.to_dict().get("variants", []))
-            else:
-                completed_variants = 0
-            # 总进度 = (已完成变体 * 总片段数 + 当前变体已完成片段) / (总变体数 * 总片段数)
-            total_work = variant_count * total_segments
-            done_work = completed_variants * total_segments + completed_segments
-            progress = int(done_work / total_work * 100)
-            progress = min(progress, 99)  # 留给 _update_progress 设置最终值
+            task_index = getattr(self, '_task_index', 0)
+
+            # 1. 写入当前 task 的片段进度 (0.0 ~ 1.0 表示当前变体完成比例)
+            seg_fraction = completed_segments / total_segments if total_segments > 0 else 0
             self.job_ref.update({
-                "progress": progress,
-                "progress_text": f"Processing segment {completed_segments}/{total_segments} (变体 {variant_index+1}/{variant_count})",
+                f"task_segment_progress.{task_index}": seg_fraction,
                 "updated_at": SERVER_TIMESTAMP,
             })
-            print(f"[INFO] Segment progress: {progress}% (variant {variant_index}, segment {completed_segments}/{total_segments})")
+
+            # 2. 读取整体状态，聚合所有 task 的进度
+            job_doc = self.job_ref.get()
+            if not job_doc.exists:
+                return
+            job_data = job_doc.to_dict()
+            completed_variants = len(job_data.get("variants", []))
+            current_progress = job_data.get("progress", 0)
+
+            # 各 task 当前变体的片段进度之和（每个 task 贡献 0~1 个变体的进度）
+            task_fractions = sum(job_data.get("task_segment_progress", {}).values())
+
+            # 总进度 = (已完成变体数 + 各 task 正在处理的变体进度) / 总变体数
+            overall = (completed_variants + task_fractions) / variant_count * 100
+            progress = max(1, min(99, round(overall)))
+
+            # 3. 只在进度增加时更新（避免并行 task 导致进度回退）
+            if progress > current_progress:
+                self.job_ref.update({
+                    "progress": progress,
+                    "progress_text": f"变体 {variant_index+1}/{variant_count} - 片段 {completed_segments}/{total_segments}",
+                    "updated_at": SERVER_TIMESTAMP,
+                })
+            print(f"[INFO] Segment progress: {progress}% (variant {variant_index+1}, segment {completed_segments}/{total_segments})")
         except Exception as e:
             print(f"[WARNING] Failed to update segment progress: {e}")
 
     def _update_progress(self) -> None:
-        """更新任务进度（基于已完成的变体数量）"""
+        """更新任务进度（变体完成时调用）"""
         try:
+            task_index = getattr(self, '_task_index', 0)
+            # 重置当前 task 的片段进度（变体已完成，避免与 completed_variants 重复计算）
+            self.job_ref.update({
+                f"task_segment_progress.{task_index}": 0,
+            })
+
             job_doc = self.job_ref.get()
             if job_doc.exists:
                 job_data = job_doc.to_dict()
@@ -1277,7 +1300,10 @@ class FissionWorker:
                 completed_variants = len(job_data.get("variants", []))
 
                 if variant_count > 0:
-                    progress = int((completed_variants / variant_count) * 100)
+                    # 聚合：已完成变体 + 其他 task 正在处理的变体进度
+                    task_fractions = sum(job_data.get("task_segment_progress", {}).values())
+                    overall = (completed_variants + task_fractions) / variant_count * 100
+                    progress = max(1, min(99, round(overall)))
                     self.job_ref.update({
                         "progress": progress,
                         "progress_text": f"已完成 {completed_variants}/{variant_count} 个变体",
@@ -1300,6 +1326,7 @@ class FissionWorker:
                         "status": "COMPLETED",
                         "progress": 100,
                         "progress_text": f"全部完成！共生成 {completed_variants} 个变体",
+                        "task_segment_progress": {},
                         "updated_at": SERVER_TIMESTAMP,
                     })
                     print(f"[INFO] Job completed! All {completed_variants} variants generated.")

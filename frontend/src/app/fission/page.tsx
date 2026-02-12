@@ -1105,17 +1105,17 @@ export default function FissionPage() {
                     return (
                     <div className="mt-3">
                       <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                        {job.status === 'QUEUED' && job.progress === 0 ? (
-                          <div className="bg-gradient-to-r from-yellow-400 via-yellow-500 to-yellow-400 h-2 rounded-full animate-pulse" style={{ width: '30%' }} />
-                        ) : isStuck ? (
+                        {isStuck ? (
                           <div className="bg-red-400 h-2 rounded-full" style={{ width: '100%' }} />
+                        ) : (job.status === 'QUEUED' || job.progress === 0) ? (
+                          <div className="bg-gradient-to-r from-indigo-400 via-purple-500 to-indigo-400 h-2 rounded-full animate-pulse" style={{ width: '30%' }} />
                         ) : (
                           <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-2 rounded-full transition-all"
                             style={{ width: `${Math.max(job.progress, 2)}%` }} />
                         )}
                       </div>
                       <p className={`text-xs mt-1 ${isStuck ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
-                        {job.status === 'QUEUED' ? '排队等待 Worker 启动...' : isStuck ? '处理超时：1 小时内无进度，Worker 可能异常' : `处理中 ${job.progress}%`}
+                        {isStuck ? '处理超时：1 小时内无进度，Worker 可能异常' : job.status === 'QUEUED' ? '排队等待 Worker 启动...' : job.progress === 0 ? '加载中...' : `处理中 ${job.progress}%`}
                       </p>
                     </div>
                     );
