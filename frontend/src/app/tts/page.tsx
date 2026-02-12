@@ -418,7 +418,7 @@ export default function TTSPage() {
                                           const audio = new Audio(res.data.download_url);
                                           audio.play().catch(() => alert("播放失败"));
                                         }
-                                      } catch { alert("获取播放链接失败"); }
+                                      } catch (_e) { alert("获取播放链接失败"); }
                                     }}
                                     className="text-xs bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700"
                                   >
@@ -437,7 +437,7 @@ export default function TTSPage() {
                                           a.click();
                                           document.body.removeChild(a);
                                         }
-                                      } catch { alert("下载失败，请重试"); }
+                                      } catch (_e) { alert("下载失败，请重试"); }
                                     }}
                                     className="text-xs bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700"
                                   >
@@ -448,7 +448,7 @@ export default function TTSPage() {
                                       try {
                                         const res = await apiClient.get(`/tts/download/${task.audio_file}`);
                                         if (res.data.download_url) window.open(res.data.download_url, "_blank");
-                                      } catch { alert("预览失败，请重试"); }
+                                      } catch (_e) { alert("预览失败，请重试"); }
                                     }}
                                     className="text-xs bg-gray-100 text-gray-600 px-3 py-1 rounded-lg hover:bg-gray-200"
                                   >
@@ -469,7 +469,6 @@ export default function TTSPage() {
           </div>
         </div>
       </div>
-    </div>
   );
 }
 
