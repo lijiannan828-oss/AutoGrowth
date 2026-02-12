@@ -135,6 +135,7 @@ class FissionWorker:
 
             job_data = job_doc.to_dict()
             variant_count = job_data["variant_count"]
+            self.variant_count = variant_count
 
             # 计算当前任务要处理的变体索引
             my_variants = []
@@ -453,7 +454,8 @@ class FissionWorker:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total_start = time.time()
-        MAX_WORKERS = int(os.environ.get("FISSION_PARALLEL_SEGMENTS", "4"))
+        cpu_count = os.cpu_count() or 4
+        MAX_WORKERS = int(os.environ.get("FISSION_PARALLEL_SEGMENTS", str(cpu_count)))
 
         # 根据视频时长动态调整切片大小
         video_info = self._get_video_info(input_path)
@@ -487,6 +489,7 @@ class FissionWorker:
 
         # 全量并行处理所有片段
         results = {}
+        completed_count = 0
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {
                 executor.submit(_process_one_segment, idx, path): idx
@@ -497,6 +500,8 @@ class FissionWorker:
                 try:
                     output_seg = future.result()
                     results[seg_idx] = output_seg
+                    completed_count += 1
+                    self._update_segment_progress(variant_index, completed_count, total)
                 except Exception as e:
                     print(f"[ERROR] Segment {seg_idx}/{total} failed: {e}")
                     raise
@@ -1067,15 +1072,19 @@ class FissionWorker:
             print(f"[DEBUG] Audio filter chain: {af_chain}")
 
         # 编码参数优化 - 速度优先
+        # 根据并发数分配线程，避免多个 ffmpeg 进程争抢 CPU
+        cpu_count = os.cpu_count() or 4
+        max_workers = int(os.environ.get("FISSION_PARALLEL_SEGMENTS", str(cpu_count)))
+        threads_per_process = max(1, cpu_count // max_workers)
         cmd.extend([
             "-c:v", "libx264",           # 视频编码器
             "-preset", "ultrafast",       # 最快编码速度
             "-profile:v", "main",         # main profile（编码效率更高）
             "-level", "4.0",              # H.264 level 4.0（支持更高分辨率）
             "-crf", "28",                 # 质量参数（28 换取更快速度）
-            "-threads", "0",              # 自动使用所有 CPU 核心
+            "-threads", str(threads_per_process),  # 按并发数分配线程，避免争抢
             "-c:a", "aac",                # 音频编码器
-            "-b:a", "128k",               # 音频比特率
+            "-b:a", "128k",              # 音频比特率
             "-ar", "44100",               # 音频采样率
             "-strict", "experimental",    # 允许实验性编码器
             "-movflags", "+faststart",    # 优化流媒体播放
@@ -1236,6 +1245,29 @@ class FissionWorker:
             f"task_errors.task_{task_index}": error_msg,
             "updated_at": SERVER_TIMESTAMP,
         })
+
+    def _update_segment_progress(self, variant_index: int, completed_segments: int, total_segments: int) -> None:
+        """更新分片级进度"""
+        try:
+            variant_count = getattr(self, 'variant_count', 1)
+            job_doc = self.job_ref.get()
+            if job_doc.exists:
+                completed_variants = len(job_doc.to_dict().get("variants", []))
+            else:
+                completed_variants = 0
+            # 总进度 = (已完成变体 * 总片段数 + 当前变体已完成片段) / (总变体数 * 总片段数)
+            total_work = variant_count * total_segments
+            done_work = completed_variants * total_segments + completed_segments
+            progress = int(done_work / total_work * 100)
+            progress = min(progress, 99)  # 留给 _update_progress 设置最终值
+            self.job_ref.update({
+                "progress": progress,
+                "progress_text": f"Processing segment {completed_segments}/{total_segments} (变体 {variant_index+1}/{variant_count})",
+                "updated_at": SERVER_TIMESTAMP,
+            })
+            print(f"[INFO] Segment progress: {progress}% (variant {variant_index}, segment {completed_segments}/{total_segments})")
+        except Exception as e:
+            print(f"[WARNING] Failed to update segment progress: {e}")
 
     def _update_progress(self) -> None:
         """更新任务进度（基于已完成的变体数量）"""
