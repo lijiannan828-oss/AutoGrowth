@@ -81,6 +81,21 @@ function updateTreeData(
   });
 }
 
+function markAsLeaf(
+  list: ProgramTreeNode[],
+  key: React.Key,
+): ProgramTreeNode[] {
+  return list.map((node) => {
+    if (node.key === key) {
+      return { ...node, isLeaf: true, children: [] };
+    }
+    if (node.children) {
+      return { ...node, children: markAsLeaf(node.children as ProgramTreeNode[], key) };
+    }
+    return node;
+  });
+}
+
 export function ProgramBrowserTree({
   mode = "gdrive",
   gcsScope = "processed",
@@ -166,95 +181,86 @@ export function ProgramBrowserTree({
   );
 
   const handleLoadData = async (node: EventDataNode<ProgramTreeNode>) => {
-    console.log("[ProgramBrowserTree] handleLoadData called", { 
-      nodeKey: node.key, 
-      hasChildren: !!node.children?.length,
-      nodeTitle: node.title,
-      dataRef: (node as ProgramTreeNode).dataRef
-    });
-    
     if (node.children && node.children.length) {
-      // If node already has children, just expand it
-      console.log("[ProgramBrowserTree] Node already has children, just expanding");
       setExpandedKeys((prev) =>
         prev.includes(node.key) ? prev : [...prev, node.key],
       );
       return;
     }
     const dataRef = (node as ProgramTreeNode).dataRef;
-    if (!dataRef) {
-      console.warn("[ProgramBrowserTree] No dataRef found for node", node);
-      return;
-    }
-    
-    console.log("[ProgramBrowserTree] Loading children for node", { nodeKey: node.key, dataRef, mode });
+    if (!dataRef) return;
 
-    let mapped: ProgramTreeNode[] = [];
+    try {
+      let mapped: ProgramTreeNode[] = [];
 
-    if (mode === "gdrive") {
-      const children = await browseDriveFolder({
-        driveFolderId: dataRef.id,
-        gcsPrefix: dataRef.gcsPrefix,
-      });
-      mapped = children.map((folder) => ({
-        key: folder.id,
-        title: renderProgramTitle(folder.name, folder.in_gcs, mode),
-        isLeaf: !folder.has_children,
-        selectable: true,
-        disableCheckbox: true,
-        dataRef: {
-          id: folder.id,
-          label: folder.name,
-          path: dataRef.path ? `${dataRef.path}/${folder.name}` : folder.name,
-          gcsPrefix: dataRef.gcsPrefix
-            ? `${dataRef.gcsPrefix}/${folder.name}`
-            : folder.name,
-          inGcs: folder.in_gcs,
-        },
-      }));
-    } else {
-      // GCS Mode
-      const prefix = dataRef.path;
-      const children = await fetchPipelineFiles({
-        scope: gcsScope,
-        drama: prefix,
-      });
-
-      mapped = children.map((file) => {
-        // 后端返回的 path 应该是完整路径（如 "KR051P07S01_김대표의 엽기적인 부인/Episodes/subfolder"）
-        // 但我们需要确保它是完整的
-        let fullPath = file.path;
-        
-        // 如果后端返回的路径不是以当前前缀开头，说明是相对路径，需要拼接
-        if (!fullPath.startsWith(prefix)) {
-          fullPath = `${prefix}/${file.path}`.replace(/\/+/g, "/");
-        }
-        
-        // 确保路径是完整的（去除开头的斜杠）
-        fullPath = fullPath.replace(/^\/+/, "");
-        
-        return {
-          key: fullPath,
-          title: renderProgramTitle(file.name, false, mode),
-          isLeaf: !file.is_directory,
+      if (mode === "gdrive") {
+        const children = await browseDriveFolder({
+          driveFolderId: dataRef.id,
+          gcsPrefix: dataRef.gcsPrefix,
+        });
+        mapped = children.map((folder) => ({
+          key: folder.id,
+          title: renderProgramTitle(folder.name, folder.in_gcs, mode),
+          isLeaf: !folder.has_children,
           selectable: true,
-          disableCheckbox: !checkable,
+          disableCheckbox: true,
           dataRef: {
-            id: fullPath,
-            label: file.name,
-            path: fullPath,
-            isDirectory: file.is_directory,
-            size: file.size_bytes,
+            id: folder.id,
+            label: folder.name,
+            path: dataRef.path ? `${dataRef.path}/${folder.name}` : folder.name,
+            gcsPrefix: dataRef.gcsPrefix
+              ? `${dataRef.gcsPrefix}/${folder.name}`
+              : folder.name,
+            inGcs: folder.in_gcs,
           },
-        };
-      });
-    }
+        }));
+      } else {
+        // GCS Mode
+        const prefix = dataRef.path;
+        const children = await fetchPipelineFiles({
+          scope: gcsScope,
+          drama: prefix,
+        });
 
-    setTreeData((prev) => updateTreeData(prev, node.key, mapped));
-    // Expand the node after loading its children
-    setExpandedKeys((prev) =>
-      prev.includes(node.key) ? prev : [...prev, node.key],
-    );
+        mapped = children.map((file) => {
+          let fullPath = file.path;
+          if (!fullPath.startsWith(prefix)) {
+            fullPath = `${prefix}/${file.path}`.replace(/\/+/g, "/");
+          }
+          fullPath = fullPath.replace(/^\/+/, "");
+
+          return {
+            key: fullPath,
+            title: renderProgramTitle(file.name, false, mode),
+            isLeaf: !file.is_directory,
+            selectable: true,
+            disableCheckbox: !checkable,
+            dataRef: {
+              id: fullPath,
+              label: file.name,
+              path: fullPath,
+              isDirectory: file.is_directory,
+              size: file.size_bytes,
+            },
+          };
+        });
+      }
+
+      // 空数据时标记为叶子节点，防止 rc-tree 无限重试
+      if (mapped.length === 0) {
+        setTreeData((prev) => markAsLeaf(prev, node.key));
+        return;
+      }
+
+      setTreeData((prev) => updateTreeData(prev, node.key, mapped));
+      setExpandedKeys((prev) =>
+        prev.includes(node.key) ? prev : [...prev, node.key],
+      );
+    } catch (error) {
+      console.error("[ProgramBrowserTree] 加载子节点失败", error);
+      // 加载失败时标记为叶子节点，防止 rc-tree 无限重试
+      setTreeData((prev) => markAsLeaf(prev, node.key));
+    }
   };
 
   const handleSelect: TreeProps["onSelect"] = (keys, info) => {

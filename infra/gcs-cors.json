@@ -1,0 +1,8 @@
+[
+  {
+    "origin": ["https://autogrowth-477909.web.app"],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type", "Content-Disposition", "Content-Length"],
+    "maxAgeSeconds": 3600
+  }
+]

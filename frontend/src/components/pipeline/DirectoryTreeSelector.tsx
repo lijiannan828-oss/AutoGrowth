@@ -53,6 +53,18 @@ function updateTreeData(list: FolderTreeNode[], key: TreeKey, children: FolderTr
   });
 }
 
+function markAsLeaf(list: FolderTreeNode[], key: TreeKey): FolderTreeNode[] {
+  return list.map((node) => {
+    if (node.key === key) {
+      return { ...node, isLeaf: true, children: [] };
+    }
+    if (node.children) {
+      return { ...node, children: markAsLeaf(node.children as FolderTreeNode[], key) };
+    }
+    return node;
+  });
+}
+
 function mapToTreeNodes(
   parentMeta: { path: string; gcsPrefix: string },
   folders: FolderBrowseNode[],
@@ -139,15 +151,29 @@ export function DirectoryTreeSelector({ program, value, onChange }: DirectoryTre
     }
     const dataRef = (node as FolderTreeNode).dataRef;
     if (!dataRef) return;
-    const folders = await browseDriveFolder({
-      driveFolderId: dataRef.id,
-      gcsPrefix: dataRef.gcsPrefix,
-    });
-    const children = mapToTreeNodes({ path: dataRef.path, gcsPrefix: dataRef.gcsPrefix }, folders);
-    setTreeData((prev) => updateTreeData(prev, node.key as TreeKey, children));
-    setExpandedKeys((prev) =>
-      prev.includes(node.key as TreeKey) ? prev : [...prev, node.key as TreeKey],
-    );
+
+    try {
+      const folders = await browseDriveFolder({
+        driveFolderId: dataRef.id,
+        gcsPrefix: dataRef.gcsPrefix,
+      });
+      const children = mapToTreeNodes({ path: dataRef.path, gcsPrefix: dataRef.gcsPrefix }, folders);
+
+      // 空数据时标记为叶子节点，防止 rc-tree 无限重试
+      if (children.length === 0) {
+        setTreeData((prev) => markAsLeaf(prev, node.key as TreeKey));
+        return;
+      }
+
+      setTreeData((prev) => updateTreeData(prev, node.key as TreeKey, children));
+      setExpandedKeys((prev) =>
+        prev.includes(node.key as TreeKey) ? prev : [...prev, node.key as TreeKey],
+      );
+    } catch (error) {
+      console.error("[DirectoryTreeSelector] 加载子节点失败", error);
+      // 加载失败时标记为叶子节点，防止 rc-tree 无限重试
+      setTreeData((prev) => markAsLeaf(prev, node.key as TreeKey));
+    }
   };
 
   const handleCheck: TreeProps["onCheck"] = (_keys, info) => {
