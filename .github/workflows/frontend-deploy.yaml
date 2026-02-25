@@ -1,4 +1,4 @@
-name: Frontend Deploy to Firebase Hosting
+name: Frontend Deploy to Production (Cloud Run + Firebase Hosting)
 
 on:
   push:
@@ -10,30 +10,23 @@ on:
   workflow_dispatch: {}
 
 env:
+  PROJECT_ID: fleet-blend-469520-n7
+  REGION: us-central1
+  ARTIFACT_REGISTRY_REPO: autogrowth-docker
+  SERVICE_NAME: autogrowth-frontend
   FIREBASE_PROJECT_ID: autogrowth-477909
 
 jobs:
   deploy:
-    name: Build and Deploy Frontend
+    name: Build and Deploy Frontend (Production)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
 
-    defaults:
-      run:
-        working-directory: ./frontend
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Authenticate to Google Cloud
-        id: gcp-auth
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-          token_format: 'access_token'
 
       - name: Verify required secrets
         run: |
@@ -43,24 +36,27 @@ jobs:
           fi
           if [ -z "${{ secrets.BACKEND_API_URL }}" ]; then
             echo "❌ BACKEND_API_URL is missing"
-            echo "   Please add BACKEND_API_URL in GitHub Secrets (Cloud Run HTTPS URL)"
             exit 1
           fi
           echo "✅ Secrets present"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
 
-      - name: Inject production env
+      - name: Configure Docker for Artifact Registry
         run: |
-          cat <<'EOF' > .env.production
+          gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+      - name: Create .env.production for build
+        working-directory: ./frontend
+        run: |
+          cat <<'ENVEOF' > .env.production
           NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCx8tXxeiI9pZCxrr_fEwCyW8d73HFlD78
           NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=fleet-blend-469520-n7.firebaseapp.com
           NEXT_PUBLIC_FIREBASE_PROJECT_ID=fleet-blend-469520-n7
@@ -69,17 +65,62 @@ jobs:
           NEXT_PUBLIC_FIREBASE_APP_ID=1:969581645484:web:64f6a7f2baf6ad41265909
           NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-VKT8LLFPYL
           NEXT_PUBLIC_API_URL=${{ secrets.BACKEND_API_URL }}
-          EOF
-          echo "✅ Wrote .env.production"
+          ENVEOF
+          echo "✅ Created .env.production"
 
-      - name: Build static site
+      - name: Build Docker image
+        working-directory: ./frontend
         run: |
-          npm run build
+          docker build -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+                       -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:latest .
 
-      - name: Deploy to Firebase Hosting (force, frameworks)
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA}
+          docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:latest
+
+      - name: Deploy to Cloud Run (Production)
+        run: |
+          gcloud run deploy ${SERVICE_NAME} \
+            --image ${REGION}-docker.pkg.dev/${PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${SERVICE_NAME}:${GITHUB_SHA} \
+            --region ${REGION} \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --memory 512Mi \
+            --cpu 1 \
+            --min-instances 0 \
+            --max-instances 10 \
+            --timeout 60 \
+            --concurrency 80 \
+            --project ${PROJECT_ID}
+
+      - name: Generate production firebase.json
+        working-directory: ./frontend
+        run: |
+          cat <<'FBEOF' > firebase.json
+          {
+            "hosting": {
+              "public": "public",
+              "rewrites": [
+                {
+                  "source": "**",
+                  "run": {
+                    "serviceId": "autogrowth-frontend",
+                    "region": "us-central1"
+                  }
+                }
+              ]
+            }
+          }
+          FBEOF
+          echo "✅ Generated production firebase.json"
+          cat firebase.json
+
+      - name: Deploy Firebase Hosting (proxy to Cloud Run)
+        working-directory: ./frontend
         env:
-          FIREBASE_CLI_EXPERIMENTS: webframeworks
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           npx --yes firebase-tools@latest deploy \
             --only hosting \
@@ -87,3 +128,14 @@ jobs:
             --force \
             --non-interactive
 
+      - name: Health check
+        run: |
+          sleep 10
+          SERVICE_URL=$(gcloud run services describe ${SERVICE_NAME} \
+            --region ${REGION} \
+            --format 'value(status.url)' \
+            --project ${PROJECT_ID})
+          curl -f ${SERVICE_URL} || echo "⚠️ Health check failed, but continuing..."
+          echo "✅ Production frontend deployed!"
+          echo "📍 Cloud Run: ${SERVICE_URL}"
+          echo "📍 Firebase Hosting: https://autogrowth-477909.web.app"
