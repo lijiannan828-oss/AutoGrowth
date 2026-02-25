@@ -42,6 +42,45 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed modules
+        id: changes
+        run: |
+          echo "Detecting changed files..."
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "backend/")
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # 共享代码变更 → 所有 worker 都需要重新部署
+          SHARED_CHANGED=false
+          if echo "$CHANGED" | grep -qE '^backend/(app/core/|app/utils/|app/models/|requirements\.txt|Dockerfile)'; then
+            SHARED_CHANGED=true
+          fi
+          echo "shared_changed=$SHARED_CHANGED" >> $GITHUB_OUTPUT
+
+          # Pipeline 相关 worker
+          PIPELINE_CHANGED=false
+          if [ "$SHARED_CHANGED" = "true" ] || echo "$CHANGED" | grep -qE '^backend/app/(workers/(transfer|process|zip_compress)/|api/v1/pipeline|services/pipeline)'; then
+            PIPELINE_CHANGED=true
+          fi
+          echo "pipeline_changed=$PIPELINE_CHANGED" >> $GITHUB_OUTPUT
+
+          # Fission worker
+          FISSION_CHANGED=false
+          if [ "$SHARED_CHANGED" = "true" ] || echo "$CHANGED" | grep -qE '^backend/app/(workers/fission/|api/v1/fission|services/fission|schemas/fission)'; then
+            FISSION_CHANGED=true
+          fi
+          echo "fission_changed=$FISSION_CHANGED" >> $GITHUB_OUTPUT
+
+          # 手动触发时全部部署
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "pipeline_changed=true" >> $GITHUB_OUTPUT
+            echo "fission_changed=true" >> $GITHUB_OUTPUT
+          fi
+
+          echo "Results: shared=$SHARED_CHANGED pipeline=$PIPELINE_CHANGED fission=$FISSION_CHANGED"
 
       - name: Verify GitHub Secrets
         run: |
@@ -341,6 +380,7 @@ jobs:
           ENV
 
       - name: Deploy Transfer Worker Job (WK001)
+        if: steps.changes.outputs.pipeline_changed == 'true'
         env:
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
         run: |
@@ -361,6 +401,7 @@ jobs:
             --project ${PROJECT_ID}
 
       - name: Deploy Processor Worker Job (WK002)
+        if: steps.changes.outputs.pipeline_changed == 'true'
         env:
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
         run: |
@@ -381,6 +422,7 @@ jobs:
             --project ${PROJECT_ID}
 
       - name: Deploy ZIP Worker Job (WK003)
+        if: steps.changes.outputs.pipeline_changed == 'true'
         env:
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
         run: |
@@ -401,6 +443,7 @@ jobs:
             --project ${PROJECT_ID}
 
       - name: Deploy Fission Worker Job (WK004)
+        if: steps.changes.outputs.fission_changed == 'true'
         env:
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/service-account.json
         run: |

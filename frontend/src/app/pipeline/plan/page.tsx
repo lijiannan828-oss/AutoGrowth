@@ -142,7 +142,7 @@ export default function PipelinePlanPage() {
           <div className="grid gap-6 lg:grid-cols-2">
             <Card
               title="剧集目录"
-              bordered={false}
+              variant="borderless"
               className="shadow-sm border border-gray-100"
               extra={
                 <div className="flex items-center gap-4 text-xs text-gray-500">
@@ -179,7 +179,7 @@ export default function PipelinePlanPage() {
                   )}
                 </div>
               }
-              bordered={false}
+              variant="borderless"
               className="shadow-sm border border-gray-100"
               extra={
                 selectedProgram && (
@@ -213,7 +213,7 @@ export default function PipelinePlanPage() {
 
           <Card
             title="传输确认"
-            bordered={false}
+            variant="borderless"
             className="shadow-sm border border-gray-100 flex flex-col gap-4"
           >
             {selectedProgram ? (

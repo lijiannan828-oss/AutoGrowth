@@ -103,7 +103,7 @@ export default function SubtitlePage() {
     );
   };
 
-  // 开始处理
+  // 开始处理（签名URL直传GCS，绕过Cloud Run请求体限制）
   const startProcessing = async () => {
     if (selectedFiles.length === 0 || targetLanguages.length === 0) {
       alert("请选择文件和目标语言");
@@ -113,18 +113,29 @@ export default function SubtitlePage() {
     setUploading(true);
 
     for (const file of selectedFiles) {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("target_languages", JSON.stringify(targetLanguages));
-      if (sourceLanguage) {
-        formData.append("source_language", sourceLanguage);
-      }
-
       try {
-        await apiClient.post("/subtitle/upload", formData, {
-          headers: {
-            "Content-Type": "multipart/form-data",
-          },
+        // 1. 获取签名上传URL
+        const urlRes = await apiClient.post("/subtitle/upload-url", {
+          filename: file.name,
+          content_type: file.type || "video/mp4",
+          file_size: file.size,
+          display_name: file.name.replace(/\.[^/.]+$/, ""),
+        });
+
+        const { upload_url, gcs_path } = urlRes.data;
+
+        // 2. 直传文件到GCS
+        await fetch(upload_url, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "video/mp4" },
+          body: file,
+        });
+
+        // 3. 创建字幕任务
+        await apiClient.post("/subtitle/tasks", {
+          source_video_path: gcs_path,
+          target_languages: targetLanguages,
+          ...(sourceLanguage ? { source_language: sourceLanguage } : {}),
         });
       } catch (error) {
         console.error("上传失败:", error);

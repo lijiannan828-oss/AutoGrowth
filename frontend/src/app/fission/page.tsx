@@ -19,6 +19,7 @@ interface FissionJob {
   variant_count: number;
   status: string;
   progress: number;
+  progress_text?: string;
   created_at: string;
   created_by: string;
   error_message?: string;  // 添加错误信息字段
@@ -1101,7 +1102,7 @@ export default function FissionPage() {
 
                   {(job.status === 'PROCESSING' || job.status === 'QUEUED') && (() => {
                     const startTime = processingStartTimesRef.current[job.job_id];
-                    const isStuck = job.status === 'PROCESSING' && job.progress === 0 && startTime && (Date.now() - startTime > 60 * 60 * 1000);
+                    const isStuck = job.status === 'PROCESSING' && startTime && (Date.now() - startTime > 30 * 60 * 1000);
                     return (
                     <div className="mt-3">
                       <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
@@ -1115,7 +1116,7 @@ export default function FissionPage() {
                         )}
                       </div>
                       <p className={`text-xs mt-1 ${isStuck ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
-                        {isStuck ? '处理超时：1 小时内无进度，Worker 可能异常' : job.status === 'QUEUED' ? '排队等待 Worker 启动...' : job.progress === 0 ? '加载中...' : `处理中 ${job.progress}%`}
+                        {isStuck ? '处理超时：运行超过30分钟，即将自动终止' : job.status === 'QUEUED' ? '排队等待 Worker 启动...' : job.progress === 0 ? '加载中...' : `处理中 ${job.progress}% (${job.progress_text || '按最慢并发任务计算'})`}
                       </p>
                     </div>
                     );

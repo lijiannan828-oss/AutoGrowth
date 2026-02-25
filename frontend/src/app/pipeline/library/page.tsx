@@ -564,7 +564,7 @@ export default function PipelineLibraryPage() {
   const selectionCard = (
     <Card
       title="下载确认"
-      bordered={false}
+      variant="borderless"
       className="shadow-sm border border-gray-100"
       extra={
         <Badge count={selectionCount} showZero color="#1890ff">
@@ -651,7 +651,7 @@ export default function PipelineLibraryPage() {
   const pendingSelectionCard = (
     <Card
       title="压制任务确认"
-      bordered={false}
+      variant="borderless"
       className="shadow-sm border border-gray-100"
       extra={
         <Badge count={pendingSelectionCount} showZero color="#722ed1">
@@ -752,7 +752,7 @@ export default function PipelineLibraryPage() {
         <div className="grid gap-6 lg:grid-cols-[0.4fr_0.6fr]">
           <Card
             title="已压制内容"
-            bordered={false}
+            variant="borderless"
             className="shadow-sm border border-gray-100"
             extra={
               <Button
@@ -803,7 +803,7 @@ export default function PipelineLibraryPage() {
           <div className="grid gap-6 lg:grid-cols-[0.35fr_0.65fr]">
             <Card
               title="全部资源"
-              bordered={false}
+              variant="borderless"
               className="shadow-sm border border-gray-100"
               extra={
                 <Button
@@ -878,7 +878,7 @@ export default function PipelineLibraryPage() {
                   )}
                 </div>
               }
-              bordered={false}
+              variant="borderless"
               className="shadow-sm border border-gray-100"
               extra={
                 <Button

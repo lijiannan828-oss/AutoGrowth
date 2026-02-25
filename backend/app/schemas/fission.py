@@ -109,6 +109,7 @@ class FissionJobListItem(BaseModel):
     variant_count: int
     status: str
     progress: int = 0
+    progress_text: Optional[str] = None
     created_at: Optional[datetime] = None
     created_by: Optional[str] = None
     error_message: Optional[str] = None

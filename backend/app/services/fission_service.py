@@ -129,7 +129,7 @@ class FissionService:
         total = len(all_docs)
 
         now = datetime.now(timezone.utc)
-        stale_timeout = timedelta(hours=1)
+        stale_timeout = timedelta(minutes=30)
 
         # 统计进度>=80%的任务数 + 自动标记超时任务为 FAILED
         completed_count = 0
@@ -143,21 +143,25 @@ class FissionService:
             except (ValueError, TypeError):
                 pass
 
-            # 超时检测：PROCESSING + 进度 0% + 超过 1 小时未更新 → 自动标记 FAILED
-            if data.get("status") == "PROCESSING" and int(data.get("progress", 0)) == 0:
-                updated_at = data.get("updated_at")
-                if updated_at and hasattr(updated_at, "timestamp"):
-                    elapsed = now - updated_at.replace(tzinfo=timezone.utc) if updated_at.tzinfo is None else now - updated_at
+            # 超时检测：PROCESSING + 超过 30 分钟 → 自动标记 FAILED，保留已完成变体
+            if data.get("status") == "PROCESSING":
+                created_at = data.get("created_at")
+                if created_at and hasattr(created_at, "timestamp"):
+                    elapsed = now - created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else now - created_at
                     if elapsed > stale_timeout:
+                        progress = int(data.get("progress", 0))
+                        completed_variants = data.get("variants", [])
+                        variant_count = data.get("variant_count", 0)
+                        error_msg = f"处理超时：任务运行超过30分钟，已自动终止。已完成 {len(completed_variants)}/{variant_count} 个变体"
                         try:
                             doc.reference.update({
                                 "status": "FAILED",
-                                "error_message": "处理超时：任务启动超过1小时仍无进度，已自动标记失败",
+                                "error_message": error_msg,
                                 "updated_at": SERVER_TIMESTAMP,
                             })
                             overridden[doc.id] = {
                                 "status": "FAILED",
-                                "error_message": "处理超时：任务启动超过1小时仍无进度，已自动标记失败",
+                                "error_message": error_msg,
                             }
                         except Exception as e:
                             print(f"[WARN] 自动标记超时任务失败: {doc.id}: {e}")
@@ -179,6 +183,7 @@ class FissionService:
                     variant_count=data.get("variant_count", 0),
                     status=data.get("status", "UNKNOWN"),
                     progress=data.get("progress", 0),
+                    progress_text=data.get("progress_text"),
                     created_at=data.get("created_at"),
                     created_by=data.get("created_by"),
                     error_message=data.get("error_message"),

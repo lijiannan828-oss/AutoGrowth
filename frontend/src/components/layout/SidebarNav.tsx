@@ -33,12 +33,12 @@ const navItems: NavItem[] = [
     icon: <PlayCircleOutlined />,
   },
   {
-    label: "AI 多语言字幕生成",
+    label: "AI 多语言字幕生成（待开发）",
     href: "/subtitle",
     icon: <FileTextOutlined />,
   },
   {
-    label: "AI 文字转语音",
+    label: "AI 文字转语音（待开发）",
     href: "/text-to-speech",
     icon: <SoundOutlined />,
   },

@@ -137,6 +137,7 @@ class FissionWorker:
             variant_count = job_data["variant_count"]
             self.variant_count = variant_count
             self._task_index = task_index
+            self._task_count = task_count
 
             # 计算当前任务要处理的变体索引
             my_variants = []
@@ -144,12 +145,16 @@ class FissionWorker:
                 if i % task_count == task_index:
                     my_variants.append(i)
 
+            self._my_variants_count = len(my_variants)
+            self._completed_count = 0
+
             print(f"[INFO] Task {task_index} will process variants: {my_variants}")
 
             # 第一个任务负责更新状态为 PROCESSING
             if task_index == 0:
                 self.job_ref.update({
                     "status": "PROCESSING",
+                    "task_count": task_count,
                     "progress_text": f"正在处理 ({task_count} 个并行任务)",
                     "updated_at": SERVER_TIMESTAMP,
                 })
@@ -1246,51 +1251,74 @@ class FissionWorker:
         })
 
     def _update_segment_progress(self, variant_index: int, completed_segments: int, total_segments: int) -> None:
-        """更新分片级进度 - 支持多 task 并行聚合"""
+        """更新分片级进度 - 按最慢 task 的 segment 进度体现"""
         try:
-            variant_count = getattr(self, 'variant_count', 1)
             task_index = getattr(self, '_task_index', 0)
+            task_count = getattr(self, '_task_count', 1)
+            my_variants_count = getattr(self, '_my_variants_count', 1)
+            completed_count = getattr(self, '_completed_count', 0)
 
-            # 1. 写入当前 task 的片段进度 (0.0 ~ 1.0 表示当前变体完成比例)
+            # 1. 计算当前 task 的整体进度百分比
             seg_fraction = completed_segments / total_segments if total_segments > 0 else 0
+            task_pct = (completed_count + seg_fraction) / my_variants_count * 100 if my_variants_count > 0 else 0
+
+            # 2. 写入当前 task 的进度 + segment 详情
             self.job_ref.update({
                 f"task_segment_progress.{task_index}": seg_fraction,
+                f"task_progress.{task_index}": round(task_pct, 1),
+                f"task_segment_info.{task_index}.completed": completed_segments,
+                f"task_segment_info.{task_index}.total": total_segments,
                 "updated_at": SERVER_TIMESTAMP,
             })
 
-            # 2. 读取整体状态，聚合所有 task 的进度
+            # 3. 读取所有 task 的进度，取最慢的作为整体进度
             job_doc = self.job_ref.get()
             if not job_doc.exists:
                 return
             job_data = job_doc.to_dict()
-            completed_variants = len(job_data.get("variants", []))
             current_progress = job_data.get("progress", 0)
+            all_task_progress = job_data.get("task_progress", {})
+            all_segment_info = job_data.get("task_segment_info", {})
 
-            # 各 task 当前变体的片段进度之和（每个 task 贡献 0~1 个变体的进度）
-            task_fractions = sum(job_data.get("task_segment_progress", {}).values())
+            if all_task_progress:
+                progress = max(1, min(99, round(min(all_task_progress.values()))))
+            else:
+                progress = 1
 
-            # 总进度 = (已完成变体数 + 各 task 正在处理的变体进度) / 总变体数
-            overall = (completed_variants + task_fractions) / variant_count * 100
-            progress = max(1, min(99, round(overall)))
-
-            # 3. 只在进度增加时更新（避免并行 task 导致进度回退）
-            if progress > current_progress:
+            if progress >= current_progress:
+                # 找到最慢的 task，展示其 segment 进度
+                slowest_idx = min(all_task_progress, key=all_task_progress.get) if all_task_progress else str(task_index)
+                seg_info = all_segment_info.get(str(slowest_idx), {})
+                seg_completed = seg_info.get("completed", completed_segments)
+                seg_total = seg_info.get("total", total_segments)
                 self.job_ref.update({
                     "progress": progress,
-                    "progress_text": f"变体 {variant_index+1}/{variant_count} - 片段 {completed_segments}/{total_segments}",
+                    "progress_text": f"最慢任务 segment {seg_completed}/{seg_total}",
                     "updated_at": SERVER_TIMESTAMP,
                 })
-            print(f"[INFO] Segment progress: {progress}% (variant {variant_index+1}, segment {completed_segments}/{total_segments})")
+            print(f"[INFO] Segment progress: task {task_index}={task_pct:.1f}%, segment {completed_segments}/{total_segments}, overall={progress}%")
         except Exception as e:
             print(f"[WARNING] Failed to update segment progress: {e}")
 
     def _update_progress(self) -> None:
-        """更新任务进度（变体完成时调用）"""
+        """更新任务进度（变体完成时调用）- 按最慢 task 体现"""
         try:
             task_index = getattr(self, '_task_index', 0)
-            # 重置当前 task 的片段进度（变体已完成，避免与 completed_variants 重复计算）
+            task_count = getattr(self, '_task_count', 1)
+            my_variants_count = getattr(self, '_my_variants_count', 1)
+
+            # 递增本 task 已完成变体数
+            self._completed_count = getattr(self, '_completed_count', 0) + 1
+
+            # 计算当前 task 的整体进度
+            task_pct = self._completed_count / my_variants_count * 100 if my_variants_count > 0 else 100
+
+            # 重置片段进度，更新 task 级进度
             self.job_ref.update({
                 f"task_segment_progress.{task_index}": 0,
+                f"task_progress.{task_index}": round(task_pct, 1),
+                f"task_segment_info.{task_index}.completed": 0,
+                f"task_segment_info.{task_index}.total": 0,
             })
 
             job_doc = self.job_ref.get()
@@ -1298,18 +1326,25 @@ class FissionWorker:
                 job_data = job_doc.to_dict()
                 variant_count = job_data.get("variant_count", 0)
                 completed_variants = len(job_data.get("variants", []))
+                all_task_progress = job_data.get("task_progress", {})
+                all_segment_info = job_data.get("task_segment_info", {})
 
-                if variant_count > 0:
-                    # 聚合：已完成变体 + 其他 task 正在处理的变体进度
-                    task_fractions = sum(job_data.get("task_segment_progress", {}).values())
-                    overall = (completed_variants + task_fractions) / variant_count * 100
-                    progress = max(1, min(99, round(overall)))
+                if variant_count > 0 and all_task_progress:
+                    progress = max(1, min(99, round(min(all_task_progress.values()))))
+                    slowest_idx = min(all_task_progress, key=all_task_progress.get)
+                    seg_info = all_segment_info.get(str(slowest_idx), {})
+                    seg_completed = seg_info.get("completed", 0)
+                    seg_total = seg_info.get("total", 0)
+                    if seg_total > 0:
+                        text = f"最慢任务 segment {seg_completed}/{seg_total}"
+                    else:
+                        text = f"已完成 {completed_variants}/{variant_count} 个变体"
                     self.job_ref.update({
                         "progress": progress,
-                        "progress_text": f"已完成 {completed_variants}/{variant_count} 个变体",
+                        "progress_text": text,
                         "updated_at": SERVER_TIMESTAMP,
                     })
-                    print(f"[INFO] Progress updated: {progress}% ({completed_variants}/{variant_count})")
+                    print(f"[INFO] Progress updated: {progress}% ({completed_variants}/{variant_count}, slowest=Task {slowest_idx})")
         except Exception as e:
             print(f"[WARNING] Failed to update progress: {e}")
 
@@ -1327,6 +1362,7 @@ class FissionWorker:
                         "progress": 100,
                         "progress_text": f"全部完成！共生成 {completed_variants} 个变体",
                         "task_segment_progress": {},
+                        "task_progress": {},
                         "updated_at": SERVER_TIMESTAMP,
                     })
                     print(f"[INFO] Job completed! All {completed_variants} variants generated.")
