@@ -1,16 +1,6 @@
 {
   "hosting": {
-    "site": "auto-growth",
     "public": "public",
-    "rewrites": [
-      {
-        "source": "**",
-        "run": {
-          "serviceId": "autogrowth-frontend-staging",
-          "region": "us-central1"
-        }
-      }
-    ]
+    "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
   }
 }
-

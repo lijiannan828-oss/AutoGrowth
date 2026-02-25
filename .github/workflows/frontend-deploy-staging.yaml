@@ -119,6 +119,28 @@ jobs:
           curl -f ${SERVICE_URL} || echo "⚠️ Health check failed, but continuing..."
           echo "✅ Cloud Run deployment completed"
 
+      - name: Generate staging firebase.json
+        working-directory: ./frontend
+        run: |
+          cat <<'FBEOF' > firebase.json
+          {
+            "hosting": {
+              "site": "auto-growth",
+              "public": "public",
+              "rewrites": [
+                {
+                  "source": "**",
+                  "run": {
+                    "serviceId": "autogrowth-frontend-staging",
+                    "region": "us-central1"
+                  }
+                }
+              ]
+            }
+          }
+          FBEOF
+          echo "✅ Generated staging firebase.json"
+
       - name: Deploy Firebase Hosting (proxy to Cloud Run)
         working-directory: ./frontend
         run: |
