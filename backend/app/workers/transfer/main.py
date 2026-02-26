@@ -338,6 +338,15 @@ def run_worker() -> None:
     _log(f"原始路径: {gdrive_path}")
     _log(f"修正路径: {gdrive_path_fixed}")
 
+    # 获取共享驱动器的 root folder ID，使用 --drive-root-folder-id 访问
+    root_folder_id = _get_root_folder_id(gdrive_path_fixed)
+    if root_folder_id:
+        rclone_source_path = _get_relative_path_from_root(gdrive_path_fixed)
+        _log(f"使用 root folder ID: {root_folder_id}，相对路径: {rclone_source_path}")
+    else:
+        rclone_source_path = gdrive_path_fixed
+        _log(f"未找到 root folder ID，使用完整路径: {rclone_source_path}")
+
     refresh_token = retrieve_refresh_token(token_ref)
     drive_token = _exchange_refresh_token(refresh_token)
 
@@ -349,15 +358,19 @@ def run_worker() -> None:
         cmd = [
             rclone_path,
             "copy",
-            f"my-drive:{gdrive_path_fixed}",
+            f"my-drive:{rclone_source_path}",
             f"my-gcs-bucket:{bucket_name}/{drama_name}",
             "--config",
             str(config_path),
-            "--drive-shared-with-me",
             "--transfers=8",
             "--checkers=8",
             "-P",
         ]
+
+        if root_folder_id:
+            cmd.extend(["--drive-root-folder-id", root_folder_id])
+        else:
+            cmd.append("--drive-shared-with-me")
 
         if filter_file:
             cmd.extend(["--filter-from", str(filter_file)])
