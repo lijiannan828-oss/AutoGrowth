@@ -80,7 +80,7 @@ jobs:
           {
             "hosting": {
               "site": "autogrowth-477909",
-              "public": "public",
+              "source": ".",
               "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
             }
           }
