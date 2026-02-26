@@ -86,12 +86,12 @@ jobs:
           {
             "hosting": {
               "site": "auto-growth",
-              "public": "public",
+              "source": ".",
               "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
             }
           }
           FBEOF
-          echo "✅ Generated staging firebase.json with site: auto-growth"
+          echo "✅ Generated staging firebase.json with site: auto-growth (webframeworks)"
 
       - name: Deploy to Firebase Hosting (Staging)
         env:
