@@ -10,7 +10,7 @@ on:
   workflow_dispatch: {}
 
 env:
-  FIREBASE_PROJECT_ID: fleet-blend-469520-n7
+  FIREBASE_PROJECT_ID: autogrowth-477909
 
 jobs:
   deploy:
