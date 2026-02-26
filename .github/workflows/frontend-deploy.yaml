@@ -74,6 +74,19 @@ jobs:
       - name: Build static site
         run: npm run build
 
+      - name: Generate production firebase.json
+        run: |
+          cat <<'FBEOF' > firebase.json
+          {
+            "hosting": {
+              "site": "autogrowth-477909",
+              "public": "public",
+              "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
+            }
+          }
+          FBEOF
+          echo "✅ Generated production firebase.json with site: autogrowth-477909"
+
       - name: Deploy to Firebase Hosting
         env:
           FIREBASE_CLI_EXPERIMENTS: webframeworks
