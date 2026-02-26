@@ -80,13 +80,26 @@ jobs:
       - name: Build static site
         run: npm run build
 
+      - name: Generate staging firebase.json
+        run: |
+          cat <<'FBEOF' > firebase.json
+          {
+            "hosting": {
+              "site": "auto-growth",
+              "public": "public",
+              "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
+            }
+          }
+          FBEOF
+          echo "✅ Generated staging firebase.json with site: auto-growth"
+
       - name: Deploy to Firebase Hosting (Staging)
         env:
           FIREBASE_CLI_EXPERIMENTS: webframeworks
           GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
         run: |
           npx --yes firebase-tools@latest deploy \
-            --only hosting:auto-growth \
+            --only hosting \
             --project "${PROJECT_ID}" \
             --force \
             --non-interactive
