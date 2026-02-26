@@ -85,7 +85,7 @@ jobs:
           cat <<'FBEOF' > firebase.json
           {
             "hosting": {
-              "site": "auto-growth",
+              "site": "fleet-blend-469520-n7",
               "source": ".",
               "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
             }
