@@ -338,13 +338,6 @@ def run_worker() -> None:
     _log(f"原始路径: {gdrive_path}")
     _log(f"修正路径: {gdrive_path_fixed}")
 
-    # 获取根目录的 folder ID（用于支持共享驱动器）
-    root_folder_id = _get_root_folder_id(gdrive_path_fixed)
-    # 获取相对于根目录的路径
-    relative_path = _get_relative_path_from_root(gdrive_path_fixed)
-    _log(f"根目录 folder ID: {root_folder_id}")
-    _log(f"相对路径: {relative_path}")
-
     refresh_token = retrieve_refresh_token(token_ref)
     drive_token = _exchange_refresh_token(refresh_token)
 
@@ -353,17 +346,10 @@ def run_worker() -> None:
         config_path = _write_rclone_config(drive_token, temp_dir=temp_dir)
         filter_file = _build_filter_file(include_folders, gdrive_path_fixed or drama_name, temp_dir)
 
-        # 构建 rclone 源路径
-        # 如果有 root_folder_id，使用相对路径；否则使用完整路径
-        if root_folder_id:
-            rclone_source = f"my-drive:{relative_path}"
-        else:
-            rclone_source = f"my-drive:{gdrive_path_fixed}"
-
         cmd = [
             rclone_path,
             "copy",
-            rclone_source,
+            f"my-drive:{gdrive_path_fixed}",
             f"my-gcs-bucket:{bucket_name}/{drama_name}",
             "--config",
             str(config_path),
@@ -372,10 +358,6 @@ def run_worker() -> None:
             "--checkers=8",
             "-P",
         ]
-
-        # 如果有根目录 folder ID，添加参数以支持共享驱动器
-        if root_folder_id:
-            cmd.extend(["--drive-root-folder-id", root_folder_id])
 
         if filter_file:
             cmd.extend(["--filter-from", str(filter_file)])
