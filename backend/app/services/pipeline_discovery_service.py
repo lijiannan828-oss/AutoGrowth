@@ -30,24 +30,29 @@ class FilePairInfo:
 
 def extract_episode(source: str) -> str | None:
     """Extract episode number from filename.
-    
-    Prioritizes numbers after "episode" keyword, then falls back to any episode-like pattern.
-    This handles cases like "[k29]runawayprincessecretvacation_episode000.mp4" where
-    we want to extract "000" (from episode000) rather than "29" (from [k29]).
+
+    Priority order:
+    1. "episode" followed by a number (e.g., episode000)
+    2. "ep" followed by a number (e.g., ep000)
+    3. General fallback pattern
     """
     filename = Path(source).stem
-    
-    # First, try to find "episode" followed by a number (case-insensitive)
-    episode_pattern = re.compile(r"episode[-_\s]*(\d{1,3})", re.IGNORECASE)
-    match = episode_pattern.search(filename)
-    if match:
-        return f"{int(match.group(1)):03d}"
-    
-    # Fall back to general episode pattern
-    match = EPISODE_REGEX.search(filename)
-    if not match:
+
+    # Priority 1: "episode" + number
+    m = re.search(r"episode[-_\s]*(\d{1,3})", filename, re.IGNORECASE)
+    if m:
+        return f"{int(m.group(1)):03d}"
+
+    # Priority 2: "ep" + number
+    m = re.search(r"ep[-_\s]*(\d{1,3})", filename, re.IGNORECASE)
+    if m:
+        return f"{int(m.group(1)):03d}"
+
+    # Priority 3: General fallback
+    m = EPISODE_REGEX.search(filename)
+    if not m:
         return None
-    return f"{int(match.group(1)):03d}"
+    return f"{int(m.group(1)):03d}"
 
 
 def detect_language(relative_path: str) -> str:
