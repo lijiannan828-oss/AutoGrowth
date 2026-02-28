@@ -85,13 +85,13 @@ jobs:
           cat <<'FBEOF' > firebase.json
           {
             "hosting": {
-              "site": "auto-growth",
+              "site": "fleet-blend-469520-n7",
               "source": ".",
               "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
             }
           }
           FBEOF
-          echo "✅ Generated staging firebase.json with site: auto-growth (webframeworks)"
+          echo "✅ Generated staging firebase.json with site: fleet-blend-469520-n7 (webframeworks)"
 
       - name: Deploy to Firebase Hosting (Staging)
         env:
