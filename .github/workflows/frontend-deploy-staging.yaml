@@ -98,7 +98,7 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
         run: |
           npx --yes firebase-tools@latest deploy \
-            --only hosting:fleet-blend-469520-n7 \
+            --only hosting \
             --project "${PROJECT_ID}" \
             --force \
             --non-interactive
