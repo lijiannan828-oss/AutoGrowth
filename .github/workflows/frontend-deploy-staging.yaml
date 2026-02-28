@@ -80,7 +80,8 @@ jobs:
           cat .env.production
 
       - name: Remove standalone output for Firebase Hosting
-        run: sed -i "s/output: 'standalone',/\/\/ output: 'standalone',/" next.config.ts
+        run: |
+          sed -i "s/output:.*standalone.*/\/\/ &/" next.config.ts
 
       - name: Build for Firebase Hosting
         run: npm run build
