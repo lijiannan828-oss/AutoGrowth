@@ -65,7 +65,7 @@ jobs:
 
       - name: Inject staging env
         run: |
-          cat <<'EOF' > .env.production
+          cat > .env.production << 'EOF'
           NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCx8tXxeiI9pZCxrr_fEwCyW8d73HFlD78
           NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=fleet-blend-469520-n7.firebaseapp.com
           NEXT_PUBLIC_FIREBASE_PROJECT_ID=fleet-blend-469520-n7
@@ -75,23 +75,21 @@ jobs:
           NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-VKT8LLFPYL
           NEXT_PUBLIC_API_URL=${{ env.STAGING_BACKEND_URL }}
           EOF
+          sed -i 's/^[[:space:]]*//' .env.production
           echo "✅ Wrote .env.production for staging"
+          cat .env.production
 
-      - name: Build static site
+      - name: Remove standalone output for Firebase Hosting
+        run: sed -i "s/output: 'standalone',/\/\/ output: 'standalone',/" next.config.ts
+
+      - name: Build for Firebase Hosting
         run: npm run build
 
       - name: Generate staging firebase.json
         run: |
-          cat <<'FBEOF' > firebase.json
-          {
-            "hosting": {
-              "site": "fleet-blend-469520-n7",
-              "source": ".",
-              "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
-            }
-          }
-          FBEOF
-          echo "✅ Generated staging firebase.json with site: fleet-blend-469520-n7 (webframeworks)"
+          echo '{"hosting":{"site":"fleet-blend-469520-n7","source":".","ignore":["firebase-debug.log","firebase-debug.*.log"]}}' | python3 -m json.tool > firebase.json
+          echo "✅ Generated staging firebase.json"
+          cat firebase.json
 
       - name: Deploy to Firebase Hosting (Staging)
         env:
