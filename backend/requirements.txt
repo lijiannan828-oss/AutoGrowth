@@ -25,3 +25,5 @@ opencv-python-headless==4.8.1.78
 numpy>=1.26.2
 Pillow>=10.1.0
 edge-tts>=6.1.9
+pydub>=0.25.1
+python-docx>=1.1.0

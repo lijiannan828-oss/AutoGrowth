@@ -552,7 +552,7 @@ async def _process_subtitle_task(
                 blob_name = f"vigloo-subtitle-uploads/outputs/{task_id}/{lang}.{fmt}"
                 content_bytes = content.encode("utf-8")
                 content_type = "application/x-subrip" if fmt == "srt" else "text/x-ssa"
-                upload_bytes(blob_name, content_bytes, content_type)
+                upload_bytes(blob_name, content_bytes, content_type, bucket_name=bucket_name)
 
                 subtitle_files.append(SubtitleFileInfo(
                     language=lang,
@@ -597,7 +597,7 @@ async def download_subtitle(
     try:
         blob_name = f"vigloo-subtitle-uploads/outputs/{task_id}/{language}.{subtitle_format}"
 
-        if not blob_exists(blob_name):
+        if not blob_exists(blob_name, bucket_name=settings.subtitle_bucket):
             raise HTTPException(status_code=404, detail="字幕文件不存在或尚未生成")
 
         download_filename = f"{task.filename}_{language}.{subtitle_format}"
@@ -607,6 +607,7 @@ async def download_subtitle(
             blob_name=blob_name,
             download_filename=download_filename,
             content_type=content_type,
+            bucket_name=settings.subtitle_bucket,
         )
 
         return {"download_url": download_url, "expires_in": 3600}

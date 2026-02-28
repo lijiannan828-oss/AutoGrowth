@@ -38,7 +38,7 @@ const navItems: NavItem[] = [
     icon: <FileTextOutlined />,
   },
   {
-    label: "AI 文字转语音（待开发）",
+    label: "AI 文字转语音",
     href: "/text-to-speech",
     icon: <SoundOutlined />,
   },

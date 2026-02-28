@@ -9,12 +9,17 @@
         vigloo-tts-uploads/tasks/{task_id}.json       (任务元数据)
 """
 import asyncio
+import io
 import json
 import logging
+import re
 import uuid
+import zipfile
+from xml.etree import ElementTree
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 from fastapi import APIRouter, Form, HTTPException, BackgroundTasks, UploadFile, File
+from pydantic import BaseModel
 
 from app.core.config import settings
 from app.utils.gcs import (
@@ -29,6 +34,70 @@ from app.utils.gcs import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ---- Pydantic 模型 ----
+
+class RoleVoiceConfig(BaseModel):
+    """单个角色的语音配置"""
+    voice_id: str
+    rate: float = 1.0
+    pitch: str = "+0Hz"
+    volume: str = "+0%"
+
+
+class DialogueRequest(BaseModel):
+    """多角色对话转语音请求"""
+    text: str
+    role_voices: Dict[str, RoleVoiceConfig]
+    silence_gap: int = 500  # 句间静音毫秒
+    output_format: str = "mp3"
+    filename: Optional[str] = None
+
+
+class DialogueSegment(BaseModel):
+    """解析后的对话片段"""
+    role: str
+    text: str
+
+
+def _extract_docx_text(content: bytes) -> str:
+    """从 .docx 文件提取纯文本（全选复制逻辑）"""
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        xml_content = zf.read("word/document.xml")
+    tree = ElementTree.fromstring(xml_content)
+    paragraphs = []
+    for p in tree.iter(f"{ns}p"):
+        texts = [t.text for t in p.iter(f"{ns}t") if t.text]
+        if texts:
+            paragraphs.append("".join(texts))
+    return "\n".join(paragraphs)
+
+
+# ---- 对话文本解析 ----
+
+def _parse_dialogue_text(text: str) -> List[Dict[str, str]]:
+    """
+    解析多角色对话文本，支持格式：
+      角色名: 对话内容
+      角色名：对话内容
+    没有角色前缀的行视为"旁白"
+    """
+    segments: List[Dict[str, str]] = []
+    pattern = re.compile(r"^(.{1,20})[：:]\s*(.+)$")
+
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = pattern.match(line)
+        if m:
+            segments.append({"role": m.group(1).strip(), "text": m.group(2).strip()})
+        else:
+            segments.append({"role": "旁白", "text": line})
+
+    return segments
 
 # 任务存储（同时持久化到GCS）
 tts_tasks = {}
@@ -398,3 +467,444 @@ async def download_tts_audio(task_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ===================== 多角色对话 TTS =====================
+
+
+@router.post("/dialogue/parse")
+async def parse_dialogue_text(
+    text: str = Form(None),
+    file_id: str = Form(None),
+    gcs_path: str = Form(None),
+):
+    """解析对话文本，返回检测到的角色列表和分段结果。支持直接文本、file_id、gcs_path"""
+    actual_text = ""
+
+    if text and text.strip():
+        actual_text = text.strip()
+    elif file_id:
+        _load_all_tts_files()
+        meta = _tts_files.get(file_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail="源文件不存在")
+        try:
+            blob_name = meta["gcs_blob_name"]
+            bucket, _ = get_bucket(settings.tts_bucket)
+            blob = bucket.blob(blob_name)
+            content = blob.download_as_bytes()
+            ext = meta.get("file_extension", ".txt").lower()
+            if ext == ".txt":
+                actual_text = content.decode("utf-8")
+            elif ext == ".docx":
+                try:
+                    actual_text = _extract_docx_text(content)
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f".docx 文件解析失败: {str(e)}")
+            elif ext == ".doc":
+                raise HTTPException(status_code=400, detail="不支持旧版 .doc 格式，请转换为 .docx 后重试")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取源文件失败: {str(e)}")
+    elif gcs_path:
+        try:
+            path = gcs_path.replace("gs://", "")
+            bucket_name_part = path.split("/", 1)[0]
+            blob_name = path.split("/", 1)[1] if "/" in path else ""
+            bucket, _ = get_bucket(bucket_name_part)
+            blob = bucket.blob(blob_name)
+            content = blob.download_as_bytes()
+            actual_text = content.decode("utf-8")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取GCS文件失败: {str(e)}")
+    else:
+        raise HTTPException(status_code=400, detail="请提供文本内容、源文件ID或GCS路径")
+
+    if not actual_text.strip():
+        raise HTTPException(status_code=400, detail="文本内容为空")
+
+    segments = _parse_dialogue_text(actual_text)
+    roles = list(dict.fromkeys(seg["role"] for seg in segments))
+    return {"roles": roles, "segments": segments, "text": actual_text}
+
+
+async def _generate_segment_audio(
+    text: str, voice_id: str, rate: float, pitch: str, volume: str
+) -> bytes:
+    """用 edge-tts 为单段文本生成音频，返回 mp3 bytes"""
+    import edge_tts
+
+    rate_str = f"+{int((rate - 1) * 100)}%" if rate >= 1 else f"{int((rate - 1) * 100)}%"
+    communicate = edge_tts.Communicate(
+        text=text, voice=voice_id, rate=rate_str, pitch=pitch, volume=volume,
+    )
+    audio_data = bytearray()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_data.extend(chunk["data"])
+    return bytes(audio_data)
+
+
+async def _process_dialogue_task(
+    task_id: str,
+    segments: List[Dict[str, str]],
+    role_voices: Dict[str, Dict],
+    silence_gap: int,
+    output_format: str,
+) -> None:
+    """后台处理多角色对话 TTS 任务"""
+    try:
+        from pydub import AudioSegment
+
+        tts_tasks[task_id]["status"] = "processing"
+        tts_tasks[task_id]["progress"] = 5.0
+        _save_tts_task_meta(tts_tasks[task_id])
+
+        # 生成静音片段
+        silence = AudioSegment.silent(duration=silence_gap)
+        combined = AudioSegment.empty()
+        total = len(segments)
+
+        for idx, seg in enumerate(segments):
+            role = seg["role"]
+            cfg = role_voices.get(role, {})
+            voice_id = cfg.get("voice_id", "zh-CN-XiaoxiaoNeural")
+            rate = cfg.get("rate", 1.0)
+            pitch = cfg.get("pitch", "+0Hz")
+            volume = cfg.get("volume", "+0%")
+
+            audio_bytes = await _generate_segment_audio(
+                seg["text"], voice_id, rate, pitch, volume
+            )
+            seg_audio = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
+            combined += seg_audio
+            if idx < total - 1:
+                combined += silence
+
+            progress = 5.0 + (idx + 1) / total * 75.0
+            tts_tasks[task_id]["progress"] = round(progress, 1)
+            _save_tts_task_meta(tts_tasks[task_id])
+
+        # 导出并上传
+        buf = io.BytesIO()
+        export_fmt = "mp3" if output_format == "mp3" else "wav"
+        combined.export(buf, format=export_fmt)
+        buf.seek(0)
+
+        bucket_name = settings.tts_bucket
+        blob_name = f"vigloo-tts-uploads/outputs/{task_id}.{output_format}"
+        content_type = "audio/mpeg" if output_format == "mp3" else "audio/wav"
+        upload_bytes(blob_name, buf.read(), content_type, bucket_name=bucket_name)
+
+        tts_tasks[task_id]["status"] = "completed"
+        tts_tasks[task_id]["progress"] = 100.0
+        tts_tasks[task_id]["gcs_path"] = f"gs://{bucket_name}/{blob_name}"
+        tts_tasks[task_id]["audio_file"] = task_id
+        _save_tts_task_meta(tts_tasks[task_id])
+        logger.info(f"多角色对话TTS任务完成: {task_id}")
+
+    except Exception as e:
+        logger.error(f"多角色对话TTS处理失败: {task_id}, error: {e}")
+        tts_tasks[task_id]["status"] = "failed"
+        tts_tasks[task_id]["error_message"] = str(e)
+        _save_tts_task_meta(tts_tasks[task_id])
+
+
+@router.post("/dialogue")
+async def convert_dialogue_to_speech(
+    req: DialogueRequest,
+    background_tasks: BackgroundTasks,
+):
+    """多角色对话转语音：按角色拆分文本，分别生成音频后拼接"""
+    segments = _parse_dialogue_text(req.text)
+    if not segments:
+        raise HTTPException(status_code=400, detail="未解析到有效对话内容")
+
+    # 检查每个角色是否都配置了音色
+    roles_in_text = set(seg["role"] for seg in segments)
+    missing = roles_in_text - set(req.role_voices.keys())
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"以下角色未配置音色: {', '.join(missing)}",
+        )
+
+    task_id = str(uuid.uuid4())
+    bucket_name = settings.tts_bucket
+
+    tts_tasks[task_id] = {
+        "task_id": task_id,
+        "text": req.text[:100] + "..." if len(req.text) > 100 else req.text,
+        "type": "dialogue",
+        "status": "pending",
+        "progress": 0.0,
+        "roles": list(roles_in_text),
+        "segment_count": len(segments),
+        "silence_gap": req.silence_gap,
+        "output_format": req.output_format,
+        "created_at": datetime.now().isoformat(),
+        "audio_file": None,
+        "filename": req.filename,
+        "gcs_path": f"gs://{bucket_name}/vigloo-tts-uploads/outputs/"
+                    f"{task_id}.{req.output_format}",
+    }
+    _save_tts_task_meta(tts_tasks[task_id])
+
+    role_voices_dict = {
+        k: v.model_dump() for k, v in req.role_voices.items()
+    }
+    background_tasks.add_task(
+        _process_dialogue_task,
+        task_id, segments, role_voices_dict,
+        req.silence_gap, req.output_format,
+    )
+
+    return {
+        "task_id": task_id,
+        "message": "多角色对话 TTS 任务已创建",
+        "status": "pending",
+        "segment_count": len(segments),
+        "roles": list(roles_in_text),
+    }
+
+
+# ===================== TTS 源文件管理 =====================
+
+# 源文件元数据缓存
+_tts_files: Dict[str, dict] = {}
+_tts_files_loaded = False
+
+_SUPPORTED_EXTENSIONS = {".txt", ".doc", ".docx"}
+
+
+def _load_all_tts_files() -> None:
+    """从 GCS 加载所有 TTS 源文件元数据"""
+    global _tts_files_loaded
+    if _tts_files_loaded:
+        return
+    _tts_files_loaded = True
+    try:
+        bucket, _ = get_bucket(settings.tts_bucket)
+        blobs = bucket.list_blobs(prefix="vigloo-tts-uploads/files/meta/")
+        count = 0
+        for blob in blobs:
+            if blob.name.endswith(".json"):
+                try:
+                    data = json.loads(blob.download_as_text())
+                    fid = data.get("file_id")
+                    if fid and fid not in _tts_files:
+                        _tts_files[fid] = data
+                        count += 1
+                except Exception as e:
+                    logger.warning(f"解析TTS文件元数据失败 {blob.name}: {e}")
+        logger.info(f"从GCS加载了 {count} 个TTS源文件元数据")
+    except Exception as e:
+        logger.warning(f"从GCS加载TTS源文件元数据失败: {e}")
+
+
+def _save_tts_file_meta(meta: dict) -> None:
+    """保存 TTS 源文件元数据到 GCS"""
+    try:
+        upload_json(
+            f"vigloo-tts-uploads/files/meta/{meta['file_id']}.json",
+            json.dumps(meta, ensure_ascii=False, default=str),
+            bucket_name=settings.tts_bucket,
+        )
+    except Exception as e:
+        logger.warning(f"保存TTS文件元数据到GCS失败: {e}")
+
+
+@router.post("/upload")
+async def upload_tts_source_file(
+    file: UploadFile = File(...),
+    display_name: Optional[str] = Form(None),
+):
+    """上传 TTS 源文件（.txt/.doc/.docx）到 GCS"""
+    import os
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="缺少文件名")
+
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in _SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的文件格式 {ext}，仅支持 .txt / .doc / .docx",
+        )
+
+    try:
+        content = await file.read()
+        file_id = str(uuid.uuid4())
+        bucket_name = settings.tts_bucket
+        blob_name = f"vigloo-tts-uploads/files/source/{file_id}/{file.filename}"
+        gcs_path = f"gs://{bucket_name}/{blob_name}"
+
+        # 上传文件到 GCS
+        content_type = file.content_type or "application/octet-stream"
+        upload_bytes(blob_name, content, content_type, bucket_name=bucket_name)
+
+        # 确定显示名称
+        if not display_name or not display_name.strip():
+            display_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+
+        # 保存元数据
+        meta = {
+            "file_id": file_id,
+            "display_name": display_name.strip(),
+            "original_filename": file.filename,
+            "gcs_path": gcs_path,
+            "gcs_blob_name": blob_name,
+            "file_size": len(content),
+            "file_extension": ext,
+            "content_type": content_type,
+            "uploaded_at": datetime.now().isoformat(),
+        }
+        _tts_files[file_id] = meta
+        _save_tts_file_meta(meta)
+
+        logger.info(f"TTS源文件上传成功: {file_id} -> {gcs_path}")
+
+        return {
+            "file_id": file_id,
+            "filename": file.filename,
+            "display_name": display_name.strip(),
+            "original_filename": file.filename,
+            "gcs_path": gcs_path,
+            "size": len(content),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS源文件上传失败: {e}")
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
+
+
+@router.get("/files")
+async def list_tts_source_files():
+    """列出所有已上传的 TTS 源文件"""
+    _load_all_tts_files()
+    files_list = sorted(
+        _tts_files.values(),
+        key=lambda x: x.get("uploaded_at", ""),
+        reverse=True,
+    )
+    return {"files": files_list, "total": len(files_list)}
+
+
+@router.patch("/files/{file_id}")
+async def rename_tts_source_file(file_id: str, payload: dict):
+    """重命名 TTS 源文件的显示名称"""
+    _load_all_tts_files()
+
+    new_name = payload.get("display_name", "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="请输入新名称")
+
+    meta = _tts_files.get(file_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    meta["display_name"] = new_name
+    _tts_files[file_id] = meta
+    _save_tts_file_meta(meta)
+
+    return {
+        "file_id": file_id,
+        "display_name": new_name,
+        "message": "重命名成功",
+    }
+
+
+@router.post("/convert-from-file")
+async def convert_from_gcs_file(
+    background_tasks: BackgroundTasks,
+    file_id: str = Form(None),
+    gcs_path: str = Form(None),
+    text: str = Form(None),
+    voice_id: str = Form(...),
+    rate: float = Form(1.0),
+    pitch: str = Form("+0Hz"),
+    volume: str = Form("+0%"),
+    output_format: str = Form("mp3"),
+    filename: Optional[str] = Form(None),
+):
+    """从 GCS 源文件或直接文本创建 TTS 任务"""
+    # 获取文本内容
+    actual_text = ""
+
+    if text and text.strip():
+        actual_text = text.strip()
+    elif file_id:
+        _load_all_tts_files()
+        meta = _tts_files.get(file_id)
+        if not meta:
+            raise HTTPException(status_code=404, detail="源文件不存在")
+        # 从 GCS 读取文件内容
+        try:
+            blob_name = meta["gcs_blob_name"]
+            bucket, _ = get_bucket(settings.tts_bucket)
+            blob = bucket.blob(blob_name)
+            content = blob.download_as_bytes()
+            ext = meta.get("file_extension", ".txt").lower()
+            if ext == ".txt":
+                actual_text = content.decode("utf-8")
+            elif ext == ".docx":
+                try:
+                    actual_text = _extract_docx_text(content)
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f".docx 文件解析失败: {str(e)}")
+            elif ext == ".doc":
+                raise HTTPException(status_code=400, detail="不支持旧版 .doc 格式，请转换为 .docx 后重试")
+            if not filename:
+                filename = meta.get("display_name", meta.get("original_filename", ""))
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取源文件失败: {str(e)}")
+    elif gcs_path:
+        try:
+            # 从任意 GCS 路径读取
+            path = gcs_path.replace("gs://", "")
+            bucket_name_part = path.split("/", 1)[0]
+            blob_name = path.split("/", 1)[1] if "/" in path else ""
+            bucket, _ = get_bucket(bucket_name_part)
+            blob = bucket.blob(blob_name)
+            content = blob.download_as_bytes()
+            actual_text = content.decode("utf-8")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"读取GCS文件失败: {str(e)}")
+    else:
+        raise HTTPException(status_code=400, detail="请提供文本内容、源文件ID或GCS路径")
+
+    if not actual_text.strip():
+        raise HTTPException(status_code=400, detail="文本内容为空")
+
+    # 创建 TTS 任务
+    task_id = str(uuid.uuid4())
+    bucket_name = settings.tts_bucket
+
+    tts_tasks[task_id] = {
+        "task_id": task_id,
+        "text": actual_text[:100] + "..." if len(actual_text) > 100 else actual_text,
+        "status": "pending",
+        "progress": 0.0,
+        "voice_id": voice_id,
+        "rate": rate,
+        "pitch": pitch,
+        "volume": volume,
+        "output_format": output_format,
+        "created_at": datetime.now().isoformat(),
+        "audio_file": None,
+        "filename": filename,
+        "gcs_path": f"gs://{bucket_name}/vigloo-tts-uploads/outputs/{task_id}.{output_format}",
+    }
+    _save_tts_task_meta(tts_tasks[task_id])
+
+    background_tasks.add_task(
+        _process_tts_task, task_id, actual_text, voice_id, rate, pitch, volume, output_format,
+    )
+
+    return {
+        "task_id": task_id,
+        "message": "TTS 任务已创建",
+        "status": "pending",
+    }

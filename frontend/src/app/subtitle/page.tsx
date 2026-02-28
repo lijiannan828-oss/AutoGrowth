@@ -531,35 +531,29 @@ export default function SubtitlePage() {
               <p>上传文件开始生成字幕</p>
             </div>
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-2">
               {tasks.map((task) => {
                 const isExpanded = expandedTask === task.task_id;
                 return (
-                <div key={task.task_id} className="border rounded-xl p-5">
-                  <div className="flex justify-between items-start">
-                    <div className="flex-1">
-                      <h3 className="font-semibold">📄 {task.filename}</h3>
-                      <p className="text-sm text-gray-500">
-                        目标语言: {task.target_languages.map(code => languages.find(l => l.code === code)?.name || code).join(", ")}
+                <div key={task.task_id} className="border rounded-lg p-3">
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold truncate">📄 {task.filename}</span>
+                        <span className={`px-3 py-1 rounded-full text-sm font-medium flex-shrink-0 ${getStatusColor(task.status)}`}>
+                          {getStatusText(task.status)} {Math.round(task.progress)}%
+                        </span>
+                      </div>
+                      <p className="text-sm text-gray-500 truncate">
+                        {task.target_languages.map(code => languages.find(l => l.code === code)?.name || code).join(", ")}
                       </p>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <div className="text-right">
-                        <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusColor(task.status)}`}>
-                          {task.status === 'completed' ? '✅ 已完成' :
-                           task.status === 'processing' ? '⏳ 处理中' :
-                           task.status === 'failed' ? '❌ 失败' :
-                           '🕐 等待处理'}
-                        </span>
-                        <p className="text-sm text-gray-500 mt-1">{Math.round(task.progress)}%</p>
-                      </div>
-                      <button
-                        onClick={() => setExpandedTask(isExpanded ? null : task.task_id)}
-                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm"
-                      >
-                        {isExpanded ? "收起详情" : "查看详情"}
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => setExpandedTask(isExpanded ? null : task.task_id)}
+                      className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 flex-shrink-0"
+                    >
+                      {isExpanded ? "收起" : "详情"}
+                    </button>
                   </div>
 
                   {/* 错误信息显示 */}
@@ -581,32 +575,31 @@ export default function SubtitlePage() {
 
                   {/* 展开详情面板 */}
                   {isExpanded && (
-                    <div className="mt-4 border-t pt-4">
-                      <h4 className="font-medium mb-3">📄 任务详情</h4>
-                      <div className="grid grid-cols-2 gap-3 text-sm mb-4">
-                        <div className="bg-gray-50 rounded-lg p-3">
-                          <span className="text-gray-500">任务ID</span>
-                          <p className="font-mono text-xs mt-1">{task.task_id}</p>
+                    <div className="mt-2 border-t pt-2">
+                      <div className="grid grid-cols-4 gap-2 text-sm mb-2">
+                        <div className="bg-gray-50 rounded px-2 py-1.5">
+                          <span className="text-gray-400">ID</span>
+                          <p className="font-mono truncate">{task.task_id}</p>
                         </div>
-                        <div className="bg-gray-50 rounded-lg p-3">
-                          <span className="text-gray-500">文件名</span>
-                          <p className="mt-1">{task.filename}</p>
+                        <div className="bg-gray-50 rounded px-2 py-1.5">
+                          <span className="text-gray-400">文件</span>
+                          <p className="truncate">{task.filename}</p>
                         </div>
-                        <div className="bg-gray-50 rounded-lg p-3">
-                          <span className="text-gray-500">源语言</span>
-                          <p className="mt-1">{task.source_language ? (languages.find(l => l.code === task.source_language)?.name || task.source_language) : "自动识别"}</p>
+                        <div className="bg-gray-50 rounded px-2 py-1.5">
+                          <span className="text-gray-400">源语言</span>
+                          <p>{task.source_language ? (languages.find(l => l.code === task.source_language)?.name || task.source_language) : "自动识别"}</p>
                         </div>
-                        <div className="bg-gray-50 rounded-lg p-3">
-                          <span className="text-gray-500">创建时间</span>
-                          <p className="mt-1">{new Date(task.created_at).toLocaleString("zh-CN")}</p>
+                        <div className="bg-gray-50 rounded px-2 py-1.5">
+                          <span className="text-gray-400">创建</span>
+                          <p>{new Date(task.created_at).toLocaleString("zh-CN")}</p>
                         </div>
                       </div>
 
                       {/* 字幕文件下载列表 */}
                       {task.status === "completed" && task.subtitle_files && task.subtitle_files.length > 0 && (
                         <div>
-                          <div className="flex justify-between items-center mb-3">
-                            <h4 className="font-medium">📥 字幕文件</h4>
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="text-sm font-medium text-gray-500">📥 字幕文件</span>
                             <button
                               onClick={async () => {
                                 if (!task.subtitle_files) return;
@@ -629,54 +622,34 @@ export default function SubtitlePage() {
                                 }
                                 alert(`下载完成！成功: ${success}, 失败: ${fail}`);
                               }}
-                              className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm hover:bg-green-700"
+                              className="px-3 py-1 bg-green-600 text-white rounded text-sm hover:bg-green-700"
                             >
-                              📥 一键下载全部 ({task.subtitle_files.length})
+                              全部下载 ({task.subtitle_files.length})
                             </button>
                           </div>
-                          <div className="grid grid-cols-3 gap-3">
+                          <div className="flex flex-wrap gap-1">
                             {task.subtitle_files.map((file, idx) => (
-                              <div key={idx} className="border rounded-xl p-4">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <span className="text-2xl">📝</span>
-                                  <div>
-                                    <p className="text-sm font-medium">{languages.find(l => l.code === file.language)?.name || file.language}</p>
-                                    <p className="text-xs text-gray-500">{file.format.toUpperCase()} · {formatFileSize(file.file_size)}</p>
-                                  </div>
-                                </div>
-                                <div className="flex gap-2">
-                                  <button
-                                    onClick={async () => {
-                                      try {
-                                        const res = await apiClient.get(`/subtitle/download/${task.task_id}/${file.language}/${file.format}`);
-                                        if (res.data.download_url) {
-                                          const a = document.createElement("a");
-                                          a.href = res.data.download_url;
-                                          a.download = `${task.filename}_${file.language}.${file.format}`;
-                                          a.style.display = "none";
-                                          document.body.appendChild(a);
-                                          a.click();
-                                          document.body.removeChild(a);
-                                        }
-                                      } catch { alert("下载失败，请重试"); }
-                                    }}
-                                    className="text-xs bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700"
-                                  >
-                                    📥 下载
-                                  </button>
-                                  <button
-                                    onClick={async () => {
-                                      try {
-                                        const res = await apiClient.get(`/subtitle/download/${task.task_id}/${file.language}/${file.format}`);
-                                        if (res.data.download_url) window.open(res.data.download_url, "_blank");
-                                      } catch { alert("预览失败，请重试"); }
-                                    }}
-                                    className="text-xs bg-gray-100 text-gray-600 px-3 py-1 rounded-lg hover:bg-gray-200"
-                                  >
-                                    👁 预览
-                                  </button>
-                                </div>
-                              </div>
+                              <button
+                                key={idx}
+                                onClick={async () => {
+                                  try {
+                                    const res = await apiClient.get(`/subtitle/download/${task.task_id}/${file.language}/${file.format}`);
+                                    if (res.data.download_url) {
+                                      const a = document.createElement("a");
+                                      a.href = res.data.download_url;
+                                      a.download = `${task.filename}_${file.language}.${file.format}`;
+                                      a.style.display = "none";
+                                      document.body.appendChild(a);
+                                      a.click();
+                                      document.body.removeChild(a);
+                                    }
+                                  } catch { alert("下载失败"); }
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-1 border rounded text-sm hover:bg-indigo-50 hover:border-indigo-300 transition-colors"
+                              >
+                                <span>{languages.find(l => l.code === file.language)?.name || file.language}</span>
+                                <span className="text-gray-400">.{file.format}</span>
+                              </button>
                             ))}
                           </div>
                         </div>
@@ -684,10 +657,12 @@ export default function SubtitlePage() {
                     </div>
                   )}
 
-                  <div className="text-sm text-gray-400 mt-3 pt-3 border-t">
-                    ⏰ 创建时间: {new Date(task.created_at).toLocaleString("zh-CN")}
-                    {task.completed_at && ` | ✅ 完成时间: ${new Date(task.completed_at).toLocaleString("zh-CN")}`}
-                  </div>
+                  {!isExpanded && (
+                    <div className="text-sm text-gray-400 mt-1">
+                      {new Date(task.created_at).toLocaleString("zh-CN")}
+                      {task.completed_at && ` → ${new Date(task.completed_at).toLocaleString("zh-CN")}`}
+                    </div>
+                  )}
                 </div>
                 );
               })}

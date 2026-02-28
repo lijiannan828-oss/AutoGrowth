@@ -50,6 +50,7 @@ class Settings(BaseSettings):
 
     # TTS (文字转语音) related settings — 使用 vigloo-fission-uploads 桶内 vigloo-tts-uploads/ 前缀
     tts_bucket: str = Field(default="vigloo-fission-uploads", validation_alias="TTS_BUCKET")
+    tts_job_name: str = Field(default="tts-worker", validation_alias="TTS_JOB_NAME")
 
     database_url: str = Field(default="", validation_alias="DATABASE_URL")
     cloud_sql_connection_name: str = Field(
