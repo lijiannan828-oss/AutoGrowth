@@ -19,7 +19,7 @@ on:
           - staging
 
 env:
-  PROJECT_ID: fleet-blend-469520-n7
+  FIREBASE_PROJECT_ID: fleet-blend-469520-n7
   STAGING_BACKEND_URL: https://autogrowth-backend-staging-969581645484.us-central1.run.app
 
 jobs:
@@ -65,7 +65,7 @@ jobs:
 
       - name: Inject staging env
         run: |
-          cat > .env.production << 'EOF'
+          cat <<'EOF' > .env.production
           NEXT_PUBLIC_FIREBASE_API_KEY=AIzaSyCx8tXxeiI9pZCxrr_fEwCyW8d73HFlD78
           NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=fleet-blend-469520-n7.firebaseapp.com
           NEXT_PUBLIC_FIREBASE_PROJECT_ID=fleet-blend-469520-n7
@@ -75,22 +75,23 @@ jobs:
           NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-VKT8LLFPYL
           NEXT_PUBLIC_API_URL=${{ env.STAGING_BACKEND_URL }}
           EOF
-          sed -i 's/^[[:space:]]*//' .env.production
           echo "✅ Wrote .env.production for staging"
-          cat .env.production
 
-      - name: Remove standalone output for Firebase Hosting
-        run: |
-          sed -i "s/output:.*standalone.*/\/\/ &/" next.config.ts
-
-      - name: Build for Firebase Hosting
+      - name: Build static site
         run: npm run build
 
       - name: Generate staging firebase.json
         run: |
-          echo '{"hosting":{"site":"fleet-blend-469520-n7","source":".","ignore":["firebase-debug.log","firebase-debug.*.log"]}}' | python3 -m json.tool > firebase.json
-          echo "✅ Generated staging firebase.json"
-          cat firebase.json
+          cat <<'FBEOF' > firebase.json
+          {
+            "hosting": {
+              "site": "fleet-blend-469520-n7",
+              "source": ".",
+              "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
+            }
+          }
+          FBEOF
+          echo "✅ Generated staging firebase.json with site: fleet-blend-469520-n7"
 
       - name: Deploy to Firebase Hosting (Staging)
         env:
@@ -98,6 +99,7 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.gcp-auth.outputs.credentials_file_path }}
         run: |
           npx --yes firebase-tools@latest deploy \
-            --project "${PROJECT_ID}" \
+            --only hosting \
+            --project "${FIREBASE_PROJECT_ID}" \
             --force \
             --non-interactive
