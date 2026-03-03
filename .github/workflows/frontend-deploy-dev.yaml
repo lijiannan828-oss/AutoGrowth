@@ -18,7 +18,7 @@ on:
           - dev
 
 env:
-  PROJECT_ID: fleet-blend-469520-n7
+  FIREBASE_PROJECT_ID: autogrowth-477909
   DEV_BACKEND_URL: https://autogrowth-backend-dev-969581645484.us-central1.run.app
 
 jobs:
@@ -99,6 +99,6 @@ jobs:
         run: |
           npx --yes firebase-tools@latest deploy \
             --only hosting \
-            --project "${PROJECT_ID}" \
+            --project "${FIREBASE_PROJECT_ID}" \
             --force \
             --non-interactive
