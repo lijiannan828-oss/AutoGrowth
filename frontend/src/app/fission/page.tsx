@@ -141,7 +141,7 @@ export default function FissionPage() {
   const [inputMode, setInputMode] = useState<'upload' | 'text'>('upload'); // 输入模式：上传或文字描述
 
   // 源视频选择方式
-  const [sourceMode, setSourceMode] = useState<'select' | 'upload' | 'manual'>('select');
+  const [sourceMode, setSourceMode] = useState<'select' | 'upload' | 'manual' | 'text'>('select');
 
   // 新增：视频显示名称状态
   const [videoDisplayName, setVideoDisplayName] = useState('');
