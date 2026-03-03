@@ -424,7 +424,8 @@ async def get_all_tasks(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """获取当前用户的所有任务"""
-    _load_all_subtitle_tasks()
+    import asyncio
+    await asyncio.to_thread(_load_all_subtitle_tasks)
     user_tasks = [t for t in tasks.values() if t.created_by == current_user.user_id]
     return {"tasks": user_tasks, "total": len(user_tasks)}
 
@@ -435,7 +436,8 @@ async def get_task_status(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """获取任务状态"""
-    _load_all_subtitle_tasks()
+    import asyncio
+    await asyncio.to_thread(_load_all_subtitle_tasks)
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
     return SubtitleTaskStatusResponse(task=tasks[task_id])

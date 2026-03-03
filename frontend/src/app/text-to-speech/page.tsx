@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuthContext } from "@/context/AuthContext";
 import apiClient from "@/lib/api-client";
 import TTSTaskList from "./TTSTaskList";
+import { VoicePreviewButton, FullPreviewButton } from "./PreviewButtons";
 
 interface TTSSourceFile {
   file_id: string;
@@ -218,7 +219,6 @@ export default function TTSPage() {
         formData.append("display_name", fileDisplayName.trim());
       }
       await apiClient.post("/tts/upload", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
         onUploadProgress: (e) => {
           if (e.total) setUploadProgress(Math.round((e.loaded / e.total) * 100));
         },
@@ -437,7 +437,6 @@ export default function TTSPage() {
 
         {/* 第二：源文件输入 */}
         <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">📝 文件上传 - 源文件路径</h2>
           {/* 四个 tab */}
           <div className="flex gap-2 mb-4">
             {([
@@ -680,9 +679,7 @@ export default function TTSPage() {
               )}
             </div>
           )}
-        </div>
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-6 pt-4 border-t mt-4">
             <div className="flex-1">
               <label className="block text-sm font-medium mb-2">任务命名</label>
               <input
@@ -765,21 +762,24 @@ export default function TTSPage() {
             /* 单角色模式 */
             <div>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-4">
-                {/* 音色选择 */}
+                {/* 音色选择 + 试听 */}
                 <div>
                   <label className="block text-sm font-medium mb-2">音色</label>
-                  <select
-                    value={selectedVoice}
-                    onChange={(e) => setSelectedVoice(e.target.value)}
-                    className="w-full p-2 border rounded-lg"
-                  >
-                    <option value="">请选择</option>
-                    {voices.map((v) => (
-                      <option key={v.voice_id} value={v.voice_id}>
-                        {v.name} {v.gender === "male" ? "♂" : "♀"}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={selectedVoice}
+                      onChange={(e) => setSelectedVoice(e.target.value)}
+                      className="flex-1 p-2 border rounded-lg"
+                    >
+                      <option value="">请选择</option>
+                      {voices.map((v) => (
+                        <option key={v.voice_id} value={v.voice_id}>
+                          {v.name} {v.gender === "male" ? "♂" : "♀"}
+                        </option>
+                      ))}
+                    </select>
+                    <VoicePreviewButton voiceId={selectedVoice} />
+                  </div>
                 </div>
                 {/* 语速 */}
                 <div>
@@ -846,21 +846,24 @@ export default function TTSPage() {
                         </span>
                       </div>
                       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                        {/* 音色 */}
+                        {/* 音色 + 试听 */}
                         <div>
                           <label className="block text-xs font-medium mb-1">音色</label>
-                          <select
-                            value={roleConfigs[role]?.voice_id || ""}
-                            onChange={(e) => updateRoleConfig(role, "voice_id", e.target.value)}
-                            className="w-full p-2 border rounded-lg bg-white text-sm"
-                          >
-                            <option value="">请选择</option>
-                            {voices.map((v) => (
-                              <option key={v.voice_id} value={v.voice_id}>
-                                {v.name} {v.gender === "male" ? "♂" : "♀"}
-                              </option>
-                            ))}
-                          </select>
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={roleConfigs[role]?.voice_id || ""}
+                              onChange={(e) => updateRoleConfig(role, "voice_id", e.target.value)}
+                              className="flex-1 p-2 border rounded-lg bg-white text-sm"
+                            >
+                              <option value="">请选择</option>
+                              {voices.map((v) => (
+                                <option key={v.voice_id} value={v.voice_id}>
+                                  {v.name} {v.gender === "male" ? "♂" : "♀"}
+                                </option>
+                              ))}
+                            </select>
+                            <VoicePreviewButton voiceId={roleConfigs[role]?.voice_id || ""} />
+                          </div>
                         </div>
                         {/* 语速 */}
                         <div>
@@ -941,6 +944,22 @@ export default function TTSPage() {
                 <option value="wav">WAV</option>
               </select>
             </div>
+            {/* 综合试听按钮 */}
+            <FullPreviewButton
+              isMultiRole={isMultiRole}
+              voiceId={selectedVoice}
+              rate={rate}
+              pitch={pitch}
+              volume={volume}
+              roleConfigs={roleConfigs}
+              segments={segments}
+              roles={roles}
+              silenceGap={silenceGap}
+              sourceMode={sourceMode}
+              textContent={textContent}
+              sourceFileId={sourceFileId}
+              manualPath={manualPath}
+            />
             <button
               onClick={handleSubmit}
               disabled={submitting}

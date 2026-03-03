@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import apiClient from "@/lib/api-client";
 
 interface TTSTask {
@@ -134,11 +134,35 @@ let globalStopCb: (() => void) | null = null;
 
 function AudioActions({ taskId, filename }: { taskId: string; filename: string }) {
   const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // 组件卸载时清理定时器
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  const stopProgress = () => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    setProgress(0);
+  };
+
+  const startProgress = () => {
+    timerRef.current = setInterval(() => {
+      if (globalAudio && globalAudio.duration) {
+        const pct = (globalAudio.currentTime / globalAudio.duration) * 100;
+        setProgress(Math.min(pct, 100));
+      }
+    }, 200);
+  };
 
   const handleToggle = async () => {
     if (playing) {
       globalAudio?.pause();
       setPlaying(false);
+      stopProgress();
       return;
     }
     // 停止其他任务的播放
@@ -148,11 +172,12 @@ function AudioActions({ taskId, filename }: { taskId: string; filename: string }
       const url = res.data.download_url;
       if (!url) return;
       const audio = new Audio(url);
-      audio.onended = () => { setPlaying(false); globalAudio = null; };
+      audio.onended = () => { setPlaying(false); stopProgress(); globalAudio = null; };
       globalAudio = audio;
-      globalStopCb = () => setPlaying(false);
+      globalStopCb = () => { setPlaying(false); stopProgress(); };
       await audio.play();
       setPlaying(true);
+      startProgress();
     } catch { alert("播放失败"); }
   };
 
@@ -174,11 +199,19 @@ function AudioActions({ taskId, filename }: { taskId: string; filename: string }
   return (
     <div className="mt-4 border-t pt-4">
       <h4 className="font-medium mb-3">🎧 音频操作</h4>
-      <div className="flex gap-2">
-        <button onClick={handleToggle} className={`text-xs text-white px-3 py-1 rounded-lg ${playing ? "bg-yellow-600 hover:bg-yellow-700" : "bg-green-600 hover:bg-green-700"}`}>
+      <div className="flex items-center gap-2">
+        <button onClick={handleToggle} className={`shrink-0 text-xs text-white px-3 py-1 rounded-lg ${playing ? "bg-yellow-600 hover:bg-yellow-700" : "bg-green-600 hover:bg-green-700"}`}>
           {playing ? "⏸ 暂停" : "▶ 播放"}
         </button>
-        <button onClick={handleDownload} className="text-xs bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700">
+        {playing && (
+          <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden min-w-[120px]">
+            <div
+              className="h-full bg-gradient-to-r from-green-400 to-green-600 rounded-full transition-all duration-200"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        )}
+        <button onClick={handleDownload} className="shrink-0 text-xs bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700">
           📥 下载
         </button>
       </div>
@@ -189,10 +222,9 @@ function AudioActions({ taskId, filename }: { taskId: string; filename: string }
 export default function TTSTaskList({ tasks, expandedTask, setExpandedTask }: TTSTaskListProps) {
   if (tasks.length === 0) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">📋 任务列表</h2>
-        <div className="text-center py-16 text-gray-400">
-          <div className="text-6xl mb-4 opacity-50">🔊</div>
+      <div className="bg-card rounded-xl border shadow-sm p-6">
+        <h2 className="text-base font-semibold mb-4 pb-2 border-b">任务列表</h2>
+        <div className="text-center py-16 text-muted-foreground">
           <h3 className="text-lg font-medium">暂无转换任务</h3>
           <p>上传文本文件或输入文字开始语音合成</p>
         </div>
@@ -201,8 +233,8 @@ export default function TTSTaskList({ tasks, expandedTask, setExpandedTask }: TT
   }
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">📋 任务列表</h2>
+    <div className="bg-card rounded-xl border shadow-sm p-6">
+      <h2 className="text-base font-semibold mb-4 pb-2 border-b">任务列表</h2>
       <div className="space-y-4">
         {tasks.map((task) => {
           const isExpanded = expandedTask === task.task_id;

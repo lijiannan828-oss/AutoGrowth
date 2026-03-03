@@ -74,14 +74,13 @@ export default function SubtitlePage() {
 
   useEffect(() => {
     loadTasks();
-    const interval = setInterval(loadTasks, 3000);
-    return () => clearInterval(interval);
+    // 仅在组件挂载时加载一次，不轮询
   }, [loadTasks]);
 
   // 加载已上传视频列表
   const loadGcsVideos = useCallback(async () => {
     try {
-      const res = await apiClient.get("/subtitle/videos");
+      const res = await apiClient.get("/subtitle/videos", { timeout: 120000 });
       setGcsVideos(res.data.videos || []);
     } catch (error) {
       console.error("加载视频列表失败:", error);
@@ -135,7 +134,6 @@ export default function SubtitlePage() {
         if (videoDisplayName.trim()) fd.append("display_name", videoDisplayName.trim());
         return fd;
       })(), {
-        headers: { "Content-Type": "multipart/form-data" },
         timeout: 300000,
         onUploadProgress: (e: any) => {
           const pct = Math.round((e.loaded * 90) / (e.total || 1));
