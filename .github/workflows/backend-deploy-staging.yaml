@@ -5,6 +5,7 @@ on:
     branches:
       - staging
       - develop
+      - new
     paths:
       - 'backend/**'
       - 'infra/**'

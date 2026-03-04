@@ -790,6 +790,89 @@ async def list_tts_source_files():
     return {"files": files_list, "total": len(files_list)}
 
 
+@router.post("/batch-upload")
+async def batch_upload_tts_source_files(
+    files: List[UploadFile] = File(...),
+):
+    """批量上传 TTS 源文件（.txt/.doc/.docx）到 GCS"""
+    import os
+
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个文件")
+
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="单次最多上传 20 个文件")
+
+    results = []
+    for file in files:
+        if not file.filename:
+            results.append({"filename": "unknown", "success": False, "error": "缺少文件名"})
+            continue
+
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in _SUPPORTED_EXTENSIONS:
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "error": f"不支持的文件格式 {ext}，仅支持 .txt / .doc / .docx",
+            })
+            continue
+
+        try:
+            content = await file.read()
+            file_id = str(uuid.uuid4())
+            bucket_name = settings.tts_bucket
+            blob_name = f"vigloo-tts-uploads/files/source/{file_id}/{file.filename}"
+            gcs_path = f"gs://{bucket_name}/{blob_name}"
+
+            content_type = file.content_type or "application/octet-stream"
+            upload_bytes(blob_name, content, content_type, bucket_name=bucket_name)
+
+            display_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+
+            meta = {
+                "file_id": file_id,
+                "display_name": display_name,
+                "original_filename": file.filename,
+                "gcs_path": gcs_path,
+                "gcs_blob_name": blob_name,
+                "file_size": len(content),
+                "file_extension": ext,
+                "content_type": content_type,
+                "uploaded_at": datetime.now().isoformat(),
+            }
+            _tts_files[file_id] = meta
+            _save_tts_file_meta(meta)
+
+            logger.info(f"TTS源文件批量上传成功: {file_id} -> {gcs_path}")
+
+            results.append({
+                "filename": file.filename,
+                "success": True,
+                "file_id": file_id,
+                "display_name": display_name,
+                "gcs_path": gcs_path,
+                "size": len(content),
+            })
+        except Exception as e:
+            logger.error(f"TTS源文件批量上传失败 ({file.filename}): {e}")
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "error": str(e),
+            })
+
+    success_count = sum(1 for r in results if r.get("success"))
+    fail_count = sum(1 for r in results if not r.get("success"))
+
+    return {
+        "total": len(results),
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "results": results,
+    }
+
+
 @router.patch("/files/{file_id}")
 async def rename_tts_source_file(file_id: str, payload: dict):
     """重命名 TTS 源文件的显示名称"""

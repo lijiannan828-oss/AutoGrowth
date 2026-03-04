@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuthContext } from "@/context/AuthContext";
 import apiClient from "@/lib/api-client";
 import TTSTaskList from "./TTSTaskList";
+import { VoicePreviewButton, FullPreviewButton } from "./PreviewButtons";
 
 interface TTSSourceFile {
   file_id: string;
@@ -91,7 +92,7 @@ export default function TTSPage() {
   const [totalFiles, setTotalFiles] = useState(0);
 
   // 本地上传相关
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [fileDisplayName, setFileDisplayName] = useState("");
@@ -198,43 +199,84 @@ export default function TTSPage() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  // --- 本地上传到 GCS ---
+  // --- 本地上传到 GCS（支持多文件）---
   const handleLocalFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setSelectedFile(file);
-      setFileDisplayName(file.name.replace(/\.[^.]+$/, ""));
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+
+    Array.from(files).forEach(file => {
+      if (/\.(txt|doc|docx)$/i.test(file.name)) {
+        validFiles.push(file);
+      } else {
+        invalidFiles.push(file.name);
+      }
+    });
+
+    if (invalidFiles.length > 0) {
+      alert(`以下文件格式不支持，已跳过：\n${invalidFiles.join('\n')}`);
     }
+
+    if (validFiles.length > 0) {
+      setSelectedFiles(prev => [...prev, ...validFiles]);
+    }
+
+    // 重置 input，允许重复选择
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleUploadToGcs = async () => {
-    if (!selectedFile) return;
+    if (selectedFiles.length === 0) return;
     setUploading(true);
     setUploadProgress(0);
-    try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-      if (fileDisplayName.trim()) {
-        formData.append("display_name", fileDisplayName.trim());
+
+    const totalFilesCount = selectedFiles.length;
+    let completedCount = 0;
+
+    // 并行上传所有文件
+    const uploadPromises = selectedFiles.map(async (file) => {
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        const nameWithoutExt = file.name.replace(/\.[^.]+$/, "");
+        formData.append("display_name", nameWithoutExt);
+
+        await apiClient.post("/tts/upload", formData, {
+          timeout: 600000, // 单文件 10 分钟超时
+        });
+
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFilesCount) * 100));
+        return { name: file.name, success: true as const };
+      } catch (error: any) {
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFilesCount) * 100));
+        const errorMsg = error.response?.data?.detail || error.message || String(error);
+        return { name: file.name, success: false as const, error: errorMsg };
       }
-      await apiClient.post("/tts/upload", formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-        onUploadProgress: (e) => {
-          if (e.total) setUploadProgress(Math.round((e.loaded / e.total) * 100));
-        },
-      });
-      setSelectedFile(null);
-      setFileDisplayName("");
-      setUploadProgress(0);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      await loadGcsFiles();
-      setSourceMode("select");
-    } catch (error) {
-      console.error("上传失败:", error);
-      alert("上传失败");
-    } finally {
-      setUploading(false);
+    });
+
+    const results = await Promise.all(uploadPromises);
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.filter(r => !r.success).length;
+
+    if (failCount > 0) {
+      const failDetails = results.filter(r => !r.success).map(r => `${r.name}: ${r.error}`).join('\n');
+      alert(`上传完成！成功 ${successCount} 个，失败 ${failCount} 个\n\n失败详情：\n${failDetails}`);
+    } else {
+      alert(`全部上传成功！共 ${successCount} 个文件`);
     }
+
+    setSelectedFiles([]);
+    setFileDisplayName("");
+    setUploadProgress(0);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    await loadGcsFiles();
+    if (successCount > 0) setSourceMode("select");
+    setUploading(false);
   };
 
   // --- 重命名 ---
@@ -437,7 +479,6 @@ export default function TTSPage() {
 
         {/* 第二：源文件输入 */}
         <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">📝 文件上传 - 源文件路径</h2>
           {/* 四个 tab */}
           <div className="flex gap-2 mb-4">
             {([
@@ -573,42 +614,81 @@ export default function TTSPage() {
 
           {sourceMode === "upload" && (
             <div className="space-y-4">
-              <div className="flex items-center gap-4">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700"
-                >
-                  选择文件
-                </button>
-                <span className="text-sm text-gray-500">
-                  {selectedFile ? selectedFile.name : "支持 .docx / .doc / .txt"}
-                </span>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  accept=".txt,.doc,.docx"
-                  onChange={handleLocalFileSelect}
-                />
-              </div>
-              {selectedFile && (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3">
-                    <label className="text-sm font-medium whitespace-nowrap">显示名称:</label>
-                    <input
-                      type="text"
-                      value={fileDisplayName}
-                      onChange={(e) => setFileDisplayName(e.target.value)}
-                      placeholder="输入文件显示名称"
-                      className="flex-1 px-3 py-1.5 border rounded-lg text-sm"
-                    />
+              <div
+                onClick={() => !uploading && fileInputRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const files = e.dataTransfer.files;
+                  if (files && files.length > 0) {
+                    const event = { target: { files } } as unknown as React.ChangeEvent<HTMLInputElement>;
+                    handleLocalFileSelect(event);
+                  }
+                }}
+                className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center gap-3 transition-all ${
+                  selectedFiles.length > 0
+                    ? "border-indigo-400 bg-indigo-50"
+                    : "border-gray-300 hover:border-indigo-400 hover:bg-gray-50 cursor-pointer"
+                }`}
+              >
+                {selectedFiles.length > 0 ? (
+                  <div className="w-full space-y-2">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium text-gray-700">已选择 {selectedFiles.length} 个文件</span>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                          className="text-xs text-indigo-600 hover:text-indigo-800"
+                        >➕ 继续添加</button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setSelectedFiles([]); }}
+                          className="text-xs text-red-500 hover:text-red-700"
+                        >🗑️ 清空全部</button>
+                      </div>
+                    </div>
+                    <div className="max-h-40 overflow-y-auto space-y-1">
+                      {selectedFiles.map((file, idx) => (
+                        <div key={`${file.name}-${idx}`} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
+                          <span className="text-sm">📄</span>
+                          <span className="text-sm text-gray-900 truncate flex-1">{file.name}</span>
+                          <span className="text-xs text-gray-400 flex-shrink-0">{(file.size / 1024).toFixed(1)} KB</span>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSelectedFiles(prev => prev.filter((_, i) => i !== idx)); }}
+                            className="text-gray-400 hover:text-red-500 text-xs flex-shrink-0"
+                          >✕</button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
+                ) : (
+                  <>
+                    <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center">
+                      <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                      </svg>
+                    </div>
+                    <p className="text-sm font-medium text-gray-600">点击选择文件或拖拽到此处（支持多选）</p>
+                    <p className="text-xs text-gray-400">支持 .docx / .doc / .txt 格式，可一次选择多个文件</p>
+                  </>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                accept=".txt,.doc,.docx"
+                multiple
+                onChange={handleLocalFileSelect}
+              />
+              {selectedFiles.length > 0 && (
+                <div className="space-y-3">
                   <button
                     onClick={handleUploadToGcs}
                     disabled={uploading}
                     className="px-6 py-2 bg-green-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 hover:bg-green-700"
                   >
-                    {uploading ? `上传中 ${uploadProgress}%` : "📤 上传到云端"}
+                    {uploading ? `批量上传中 ${uploadProgress}%（${selectedFiles.length} 个文件）` : `📤 上传全部文件（${selectedFiles.length} 个）`}
                   </button>
                   {uploading && (
                     <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
@@ -680,9 +760,7 @@ export default function TTSPage() {
               )}
             </div>
           )}
-        </div>
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-6 pt-4 border-t mt-4">
             <div className="flex-1">
               <label className="block text-sm font-medium mb-2">任务命名</label>
               <input
@@ -765,21 +843,24 @@ export default function TTSPage() {
             /* 单角色模式 */
             <div>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-6 mb-4">
-                {/* 音色选择 */}
+                {/* 音色选择 + 试听 */}
                 <div>
                   <label className="block text-sm font-medium mb-2">音色</label>
-                  <select
-                    value={selectedVoice}
-                    onChange={(e) => setSelectedVoice(e.target.value)}
-                    className="w-full p-2 border rounded-lg"
-                  >
-                    <option value="">请选择</option>
-                    {voices.map((v) => (
-                      <option key={v.voice_id} value={v.voice_id}>
-                        {v.name} {v.gender === "male" ? "♂" : "♀"}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={selectedVoice}
+                      onChange={(e) => setSelectedVoice(e.target.value)}
+                      className="flex-1 p-2 border rounded-lg"
+                    >
+                      <option value="">请选择</option>
+                      {voices.map((v) => (
+                        <option key={v.voice_id} value={v.voice_id}>
+                          {v.name} {v.gender === "male" ? "♂" : "♀"}
+                        </option>
+                      ))}
+                    </select>
+                    <VoicePreviewButton voiceId={selectedVoice} />
+                  </div>
                 </div>
                 {/* 语速 */}
                 <div>
@@ -846,21 +927,24 @@ export default function TTSPage() {
                         </span>
                       </div>
                       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                        {/* 音色 */}
+                        {/* 音色 + 试听 */}
                         <div>
                           <label className="block text-xs font-medium mb-1">音色</label>
-                          <select
-                            value={roleConfigs[role]?.voice_id || ""}
-                            onChange={(e) => updateRoleConfig(role, "voice_id", e.target.value)}
-                            className="w-full p-2 border rounded-lg bg-white text-sm"
-                          >
-                            <option value="">请选择</option>
-                            {voices.map((v) => (
-                              <option key={v.voice_id} value={v.voice_id}>
-                                {v.name} {v.gender === "male" ? "♂" : "♀"}
-                              </option>
-                            ))}
-                          </select>
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={roleConfigs[role]?.voice_id || ""}
+                              onChange={(e) => updateRoleConfig(role, "voice_id", e.target.value)}
+                              className="flex-1 p-2 border rounded-lg bg-white text-sm"
+                            >
+                              <option value="">请选择</option>
+                              {voices.map((v) => (
+                                <option key={v.voice_id} value={v.voice_id}>
+                                  {v.name} {v.gender === "male" ? "♂" : "♀"}
+                                </option>
+                              ))}
+                            </select>
+                            <VoicePreviewButton voiceId={roleConfigs[role]?.voice_id || ""} />
+                          </div>
                         </div>
                         {/* 语速 */}
                         <div>
@@ -941,6 +1025,22 @@ export default function TTSPage() {
                 <option value="wav">WAV</option>
               </select>
             </div>
+            {/* 综合试听按钮 */}
+            <FullPreviewButton
+              isMultiRole={isMultiRole}
+              voiceId={selectedVoice}
+              rate={rate}
+              pitch={pitch}
+              volume={volume}
+              roleConfigs={roleConfigs}
+              segments={segments}
+              roles={roles}
+              silenceGap={silenceGap}
+              sourceMode={sourceMode}
+              textContent={textContent}
+              sourceFileId={sourceFileId}
+              manualPath={manualPath}
+            />
             <button
               onClick={handleSubmit}
               disabled={submitting}

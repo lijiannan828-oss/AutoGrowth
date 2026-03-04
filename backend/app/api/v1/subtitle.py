@@ -278,6 +278,107 @@ async def upload_video(
         )
 
 
+@router.post("/batch-upload", summary="批量上传视频/音频文件到GCS")
+async def batch_upload_videos(
+    files: List[UploadFile] = File(...),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """批量上传视频/音频文件到 GCS 并创建元数据，逐个处理并返回结果汇总"""
+    from google.cloud import storage as gcs_storage
+    from app.services.subtitle_video_metadata_service import SubtitleVideoMetadataService
+
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个文件")
+
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="单次最多上传 20 个文件")
+
+    allowed_types = ("video/", "audio/")
+    allowed_exts = ('.mp4', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.webm', '.flv', '.wmv')
+
+    storage_client = gcs_storage.Client()
+    bucket_name = settings.subtitle_bucket
+    bucket = storage_client.bucket(bucket_name)
+    metadata_service = SubtitleVideoMetadataService()
+
+    results = []
+    for file in files:
+        # 验证文件类型
+        is_valid = False
+        if file.content_type and any(file.content_type.startswith(t) for t in allowed_types):
+            is_valid = True
+        elif file.filename and file.filename.lower().endswith(allowed_exts):
+            is_valid = True
+
+        if not is_valid:
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "error": f"不支持的文件类型: {file.content_type}",
+            })
+            continue
+
+        try:
+            file_ext = file.filename.split(".")[-1] if file.filename and "." in file.filename else "mp4"
+            unique_filename = f"{uuid.uuid4()}.{file_ext}"
+            blob_name = f"vigloo-subtitle-uploads/uploads/{current_user.user_id}/{unique_filename}"
+            gcs_path = f"gs://{bucket_name}/{blob_name}"
+
+            content = await file.read()
+            content_type = file.content_type or "video/mp4"
+
+            blob = bucket.blob(blob_name)
+            blob.upload_from_string(content, content_type=content_type)
+
+            display_name = file.filename.rsplit(".", 1)[0] if file.filename and "." in file.filename else file.filename or "unknown"
+
+            try:
+                video_id = metadata_service.create_video_metadata(
+                    user_id=current_user.user_id,
+                    gcs_path=gcs_path,
+                    gcs_bucket=bucket_name,
+                    gcs_blob_name=blob_name,
+                    display_name=display_name,
+                    original_filename=file.filename or "unknown",
+                    file_size=len(content),
+                    content_type=content_type,
+                    file_extension=file_ext,
+                )
+            except Exception as e:
+                blob.delete()
+                results.append({
+                    "filename": file.filename,
+                    "success": False,
+                    "error": f"元数据创建失败: {str(e)}",
+                })
+                continue
+
+            results.append({
+                "filename": file.filename,
+                "success": True,
+                "video_id": video_id,
+                "display_name": display_name,
+                "gcs_path": gcs_path,
+                "size": len(content),
+            })
+        except Exception as e:
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "error": str(e),
+            })
+
+    success_count = sum(1 for r in results if r.get("success"))
+    fail_count = sum(1 for r in results if not r.get("success"))
+
+    return {
+        "total": len(results),
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "results": results,
+    }
+
+
 @router.post("/upload-url", summary="获取视频上传签名URL（支持大文件）")
 def get_upload_url(
     payload: dict,
@@ -424,7 +525,8 @@ async def get_all_tasks(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """获取当前用户的所有任务"""
-    _load_all_subtitle_tasks()
+    import asyncio
+    await asyncio.to_thread(_load_all_subtitle_tasks)
     user_tasks = [t for t in tasks.values() if t.created_by == current_user.user_id]
     return {"tasks": user_tasks, "total": len(user_tasks)}
 
@@ -435,7 +537,8 @@ async def get_task_status(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """获取任务状态"""
-    _load_all_subtitle_tasks()
+    import asyncio
+    await asyncio.to_thread(_load_all_subtitle_tasks)
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
     return SubtitleTaskStatusResponse(task=tasks[task_id])

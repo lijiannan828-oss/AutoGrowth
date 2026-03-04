@@ -132,7 +132,8 @@ export default function FissionPage() {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [uploadResults, setUploadResults] = useState<{name: string; success: boolean; error?: string}[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [gcsVideos, setGcsVideos] = useState<any[]>([]);
 
@@ -141,7 +142,7 @@ export default function FissionPage() {
   const [inputMode, setInputMode] = useState<'upload' | 'text'>('upload'); // 输入模式：上传或文字描述
 
   // 源视频选择方式
-  const [sourceMode, setSourceMode] = useState<'select' | 'upload' | 'manual'>('select');
+  const [sourceMode, setSourceMode] = useState<'select' | 'upload' | 'manual' | 'text'>('select');
 
   // 新增：视频显示名称状态
   const [videoDisplayName, setVideoDisplayName] = useState('');
@@ -259,7 +260,7 @@ export default function FissionPage() {
     // 验证输入
     if (inputMode === 'upload') {
       if (!sourceVideo) {
-        if (selectedFile && !uploading) {
+        if (selectedFiles.length > 0 && !uploading) {
           alert('请先点击“上传视频”按钮完成上传');
         } else {
           alert('请填写源视频路径或上传视频');
@@ -383,107 +384,117 @@ export default function FissionPage() {
   };
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      // 检查文件类型（放宽检查，支持常见视频格式）
-      const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv'];
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+
+    const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv'];
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+
+    Array.from(files).forEach(file => {
       const fileName = file.name.toLowerCase();
       const isVideo = file.type.startsWith('video/') || videoExtensions.some(ext => fileName.endsWith(ext));
-
-      if (!isVideo) {
-        alert('请选择视频文件（支持 mp4, mov, avi, mkv 等格式）');
-        return;
+      if (isVideo) {
+        validFiles.push(file);
+      } else {
+        invalidFiles.push(file.name);
       }
-      setSelectedFile(file);
-      console.log('文件已选择:', file.name, file.type, file.size);
+    });
 
-      // 自动填充显示名称（使用文件名，去扩展名）
-      const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
-      setVideoDisplayName(nameWithoutExt);
+    if (invalidFiles.length > 0) {
+      alert(`以下文件不是视频格式，已跳过：\n${invalidFiles.join('\n')}`);
+    }
 
-      // 自动填充剧集名称（使用文件名）
+    if (validFiles.length > 0) {
+      setSelectedFiles(prev => [...prev, ...validFiles]);
+      console.log('文件已选择:', validFiles.map(f => f.name));
+
+      // 自动填充剧集名称（使用第一个文件名）
       if (!dramaName) {
+        const nameWithoutExt = validFiles[0].name.replace(/\.[^/.]+$/, '');
         setDramaName(nameWithoutExt);
       }
     }
+
+    // 重置 input，允许重复选择同一文件
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleUpload = async () => {
-    if (!selectedFile) {
+    if (selectedFiles.length === 0) {
       alert('请先选择视频文件');
-      return;
-    }
-
-    // 检查是否已存在同名文件
-    const existingVideo = gcsVideos.find(
-      (v) => v.original_filename === selectedFile.name
-    );
-    if (existingVideo) {
-      alert(`上传失败：文件「${selectedFile.name}」已存在，已为您自动定位到该视频`);
-      // 自动切换到"选择已有视频"并选中该文件
-      setSourceMode('select');
-      setSourceVideo(existingVideo.gcs_path);
-      setVideoDropdownOpen(true);
-      setVideoSearch(existingVideo.display_name || existingVideo.name || '');
-      // 清空上传状态
-      setSelectedFile(null);
-      setVideoDisplayName('');
-      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
 
     setUploading(true);
     setUploadProgress(0);
+    setUploadResults([]);
 
-    try {
-      // 使用 FormData 直接上传到后端
-      const formData = new FormData();
-      formData.append('file', selectedFile);
+    const totalFiles = selectedFiles.length;
+    let completedCount = 0;
 
-      // 添加显示名称
-      if (videoDisplayName.trim()) {
-        formData.append('display_name', videoDisplayName.trim());
+    // 并行上传所有文件
+    const uploadPromises = selectedFiles.map(async (file) => {
+      // 检查是否已存在同名文件
+      const existingVideo = gcsVideos.find(v => v.original_filename === file.name);
+      if (existingVideo) {
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFiles) * 100));
+        return { name: file.name, success: false as const, error: '文件已存在' };
       }
 
-      setUploadProgress(0);
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
+        formData.append('display_name', nameWithoutExt);
 
-      const response = await apiClient.post('/fission/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 300000, // 5分钟超时，支持大文件上传
-        onUploadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            // 客户端→服务器传输占 0~90%，服务器→GCS 上传在响应后才算100%
-            const percent = Math.round((progressEvent.loaded * 90) / progressEvent.total);
-            setUploadProgress(Math.min(percent, 90));
-          }
-        },
-      });
+        const response = await apiClient.post('/fission/upload', formData, {
+          timeout: 600000, // 单文件 10 分钟超时
+          onUploadProgress: (progressEvent) => {
+            // 并行模式下简单更新整体进度
+          },
+        });
 
-      const { gcs_path, display_name } = response.data;
-
-      // 设置GCS路径
-      setSourceVideo(gcs_path);
-      setUploadProgress(100);
-      alert(`上传成功: ${display_name || response.data.filename}`);
-
-      // 刷新视频列表
-      await loadGcsVideos();
-
-      // 清空状态
-      setSelectedFile(null);
-      setVideoDisplayName('');
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFiles) * 100));
+        return { name: file.name, success: true as const, gcs_path: response.data.gcs_path as string };
+      } catch (error: any) {
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFiles) * 100));
+        const errorMsg = error.response?.data?.detail || error.message || String(error);
+        return { name: file.name, success: false as const, error: errorMsg };
       }
-    } catch (error: any) {
-      console.error('Upload error:', error);
-      const errorMsg = error.response?.data?.detail || error.message || String(error);
-      alert(`上传失败: ${errorMsg}`);
-    } finally {
-      setUploading(false);
+    });
+
+    const results = await Promise.all(uploadPromises);
+
+    // 设置最后一个成功上传的视频路径
+    const lastSuccess = [...results].reverse().find(r => r.success && r.gcs_path);
+    if (lastSuccess && lastSuccess.success) {
+      setSourceVideo(lastSuccess.gcs_path!);
     }
+
+    // 刷新视频列表
+    await loadGcsVideos();
+
+    // 显示结果
+    setUploadResults(results);
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.filter(r => !r.success).length;
+
+    if (failCount > 0) {
+      const failDetails = results.filter(r => !r.success).map(r => `${r.name}: ${r.error}`).join('\n');
+      alert(`上传完成！成功 ${successCount} 个，失败 ${failCount} 个\n\n失败详情：\n${failDetails}`);
+    } else {
+      alert(`全部上传成功！共 ${successCount} 个文件`);
+    }
+
+    // 清空状态
+    setSelectedFiles([]);
+    setVideoDisplayName('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    setUploading(false);
   };
 
   // 重命名视频
@@ -540,266 +551,249 @@ export default function FissionPage() {
         <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
           <h2 className="text-lg font-semibold mb-4 pb-2 border-b-2">🎬 创建裂变任务</h2>
 
-          {/* 输入模式选择 */}
-          <div className="mb-4">
-            <label className="block text-sm font-medium mb-2">视频输入方式</label>
-            <div className="flex gap-3">
-              {([['upload', '📤 上传视频文件'], ['text', '✍️ 文字描述生成（待开发）']] as const).map(([m, label]) => (
-                <button key={m} onClick={() => setInputMode(m as 'upload' | 'text')}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${inputMode === m ? "bg-indigo-600 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+          {/* 视频输入方式 - 统一标签页 */}
+          <div className="flex gap-2 mb-4">
+            {([
+              ['select', '📂 选择已有视频'],
+              ['upload', '📤 上传新视频'],
+              ['manual', '🔗 手动输入路径'],
+              ['text', '✍️ 文字描述生成']
+            ] as const).map(([m, label]) => (
+              <button
+                key={m}
+                onClick={() => setSourceMode(m as 'select' | 'upload' | 'manual' | 'text')}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                  sourceMode === m
+                    ? "bg-indigo-600 text-white"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
           {/* 根据输入模式显示不同的输入界面 */}
-          {inputMode === 'upload' ? (
+          {sourceMode === 'select' && (
             <div className="mb-4">
-              <div>
-                <div>
-                  <label className="block text-sm font-medium mb-2">源视频路径</label>
-                  {/* 三选项卡 */}
-                  <div className="flex gap-1 mb-3">
-                    {([['select', '📂 选择已有视频'], ['upload', '📤 上传新视频'], ['manual', '✏️ 手动输入路径']] as const).map(([m, label]) => (
-                      <button key={m} onClick={() => setSourceMode(m as 'select' | 'upload' | 'manual')}
-                        className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${sourceMode === m ? "bg-indigo-100 text-indigo-700 border border-indigo-300" : "bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100"}`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
+              <div ref={videoDropdownRef} className="relative">
+                {/* 选中显示 / 触发按钮 */}
+                <button
+                  type="button"
+                  onClick={() => setVideoDropdownOpen(!videoDropdownOpen)}
+                  className="w-full px-3 py-2 border rounded-lg bg-white text-left flex items-center justify-between"
+                >
+                  <span className={sourceVideo ? 'text-gray-900 truncate' : 'text-gray-400'}>
+                    {sourceVideo
+                      ? (gcsVideos.find(v => v.gcs_path === sourceVideo)?.display_name
+                        || gcsVideos.find(v => v.gcs_path === sourceVideo)?.name
+                        || sourceVideo)
+                      : '-- 选择已有视频 --'}
+                  </span>
+                  <span className="text-gray-400 ml-2 flex-shrink-0">{videoDropdownOpen ? '▲' : '▼'}</span>
+                </button>
 
-                  {/* 选择已有视频 */}
-                  {sourceMode === 'select' && (
-                    <div>
-                      <div ref={videoDropdownRef} className="relative">
-                        {/* 选中显示 / 触发按钮 */}
-                        <button
-                          type="button"
-                          onClick={() => setVideoDropdownOpen(!videoDropdownOpen)}
-                          className="w-full px-3 py-2 border rounded-lg bg-white text-left flex items-center justify-between"
-                        >
-                          <span className={sourceVideo ? 'text-gray-900 truncate' : 'text-gray-400'}>
-                            {sourceVideo
-                              ? (gcsVideos.find(v => v.gcs_path === sourceVideo)?.display_name
-                                || gcsVideos.find(v => v.gcs_path === sourceVideo)?.name
-                                || sourceVideo)
-                              : '-- 选择已有视频 --'}
-                          </span>
-                          <span className="text-gray-400 ml-2 flex-shrink-0">{videoDropdownOpen ? '▲' : '▼'}</span>
-                        </button>
-
-                        {/* 下拉面板 */}
-                        {videoDropdownOpen && (
-                          <div className="absolute z-50 mt-1 w-full bg-white border rounded-lg shadow-lg max-h-80 flex flex-col">
-                            {/* 搜索栏 + 排序 */}
-                            <div className="p-2 border-b flex gap-2 items-center">
-                              <input
-                                type="text"
-                                value={videoSearch}
-                                onChange={(e) => setVideoSearch(e.target.value)}
-                                placeholder="搜索视频名称..."
-                                className="flex-1 px-2 py-1.5 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                                autoFocus
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                              <button
-                                type="button"
-                                onClick={(e) => { e.stopPropagation(); setVideoSortBy(videoSortBy === 'name' ? 'time' : 'name'); }}
-                                className={`px-2 py-1.5 rounded text-xs font-medium whitespace-nowrap border transition-colors ${videoSortBy === 'name' ? 'bg-indigo-50 text-indigo-700 border-indigo-300' : 'bg-amber-50 text-amber-700 border-amber-300'}`}
-                                title={videoSortBy === 'name' ? '当前：按名称排序，点击切换' : '当前：按上传时间排序，点击切换'}
-                              >
-                                {videoSortBy === 'name' ? '🔤 名称' : '🕐 时间'}
-                              </button>
-                            </div>
-                            {/* 视频列表 */}
-                            <div className="overflow-y-auto flex-1">
-                              {(() => {
-                                const filtered = gcsVideos.filter(v => {
-                                  if (!videoSearch.trim()) return true;
-                                  const keyword = videoSearch.trim().toLowerCase();
-                                  const name = (v.display_name || v.name || '').toLowerCase();
-                                  const original = (v.original_filename || '').toLowerCase();
-                                  return name.includes(keyword) || original.includes(keyword);
-                                });
-                                const sorted = [...filtered].sort((a, b) => {
-                                  if (videoSortBy === 'time') {
-                                    const ta = a.uploaded_at || a.created_at || '';
-                                    const tb = b.uploaded_at || b.created_at || '';
-                                    return tb.localeCompare(ta); // 最新在前
-                                  }
-                                  const na = (a.display_name || a.name || '').toLowerCase();
-                                  const nb = (b.display_name || b.name || '').toLowerCase();
-                                  return na.localeCompare(nb, 'zh-CN');
-                                });
-                                if (sorted.length === 0) {
-                                  return <div className="px-3 py-4 text-sm text-gray-400 text-center">无匹配视频</div>;
-                                }
-                                return sorted.map((video, idx) => (
-                                  <button
-                                    key={video.video_id || idx}
-                                    type="button"
-                                    onClick={() => {
-                                      setSourceVideo(video.gcs_path);
-                                      setVideoDropdownOpen(false);
-                                      setVideoSearch('');
-                                    }}
-                                    className={`w-full text-left px-3 py-2 text-sm hover:bg-indigo-50 transition-colors ${sourceVideo === video.gcs_path ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-700'}`}
-                                  >
-                                    {video.display_name || video.name}
-                                    {video.display_name && video.original_filename && (
-                                      <span className="text-gray-400 ml-1">({video.original_filename})</span>
-                                    )}
-                                  </button>
-                                ));
-                              })()}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                      {sourceVideo && (
-                        <div className="mt-2">
-                          {renamingVideoId ? (
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="text"
-                                value={newDisplayName}
-                                onChange={(e) => setNewDisplayName(e.target.value)}
-                                className="flex-1 px-2 py-1 border rounded text-xs"
-                                maxLength={100}
-                                autoFocus
-                              />
-                              <button
-                                onClick={() => handleRename(renamingVideoId)}
-                                className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 whitespace-nowrap"
-                              >
-                                确认
-                              </button>
-                              <button
-                                onClick={() => { setRenamingVideoId(null); setNewDisplayName(''); }}
-                                className="px-2 py-1 text-gray-500 hover:text-gray-700 text-xs whitespace-nowrap"
-                              >
-                                取消
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => {
-                                const video = gcsVideos.find(v => v.gcs_path === sourceVideo);
-                                if (video && video.video_id) {
-                                  setRenamingVideoId(video.video_id);
-                                  setNewDisplayName(video.display_name || video.name);
-                                }
-                              }}
-                              className="text-xs text-blue-600 hover:text-blue-800"
-                            >
-                              ✏️ 重命名此视频
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* 上传新视频 */}
-                  {sourceMode === 'upload' && (
-                    <div>
-                      <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFileSelect} className="hidden" />
-                      <div
-                        onClick={() => !uploading && fileInputRef.current?.click()}
-                        className={`relative p-4 rounded-lg border-2 border-dashed transition-all cursor-pointer
-                          ${selectedFile
-                            ? 'border-green-400 bg-green-50/50 hover:border-green-500'
-                            : 'border-indigo-300 bg-indigo-50/30 hover:border-indigo-500 hover:bg-indigo-50/60'
-                          }
-                          ${uploading ? 'pointer-events-none opacity-70' : ''}
-                        `}
-                      >
-                        {!selectedFile ? (
-                          <div className="text-center py-2">
-                            <div className="text-3xl mb-2 opacity-60">🎬</div>
-                            <p className="text-sm font-medium text-gray-700">点击选择视频文件</p>
-                            <p className="text-xs text-gray-400 mt-1">支持 MP4、MOV、AVI、MKV</p>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-3">
-                            <div className="flex-shrink-0 w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center text-xl">🎥</div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-gray-900 truncate">{selectedFile.name}</p>
-                              <p className="text-xs text-gray-500">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
-                            </div>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setSelectedFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-                              className="flex-shrink-0 text-gray-400 hover:text-red-500 transition-colors"
-                              title="移除文件"
-                            >✕</button>
-                          </div>
-                        )}
-                      </div>
-                      {selectedFile && (
-                        <div className="mt-3">
-                          <label className="block text-xs font-medium text-gray-700 mb-1">视频显示名称</label>
-                          <input
-                            type="text"
-                            value={videoDisplayName}
-                            onChange={(e) => setVideoDisplayName(e.target.value)}
-                            placeholder="输入视频名称（可选）"
-                            className="w-full px-3 py-1.5 border rounded-lg text-sm"
-                            maxLength={100}
-                          />
-                          <button onClick={handleUpload} disabled={!selectedFile || uploading}
-                            className="w-full mt-2 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                          >
-                            {uploading ? `上传中 ${uploadProgress}%` : '📤 上传视频'}
-                          </button>
-                        </div>
-                      )}
-                      {uploading && (
-                        <div className="mt-2">
-                          <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
-                            <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-1.5 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* 手动输入GCS路径 */}
-                  {sourceMode === 'manual' && (
-                    <div>
+                {/* 下拉面板 */}
+                {videoDropdownOpen && (
+                  <div className="absolute z-50 mt-1 w-full bg-white border rounded-lg shadow-lg max-h-80 flex flex-col">
+                    {/* 搜索栏 + 排序 */}
+                    <div className="p-2 border-b flex gap-2 items-center">
                       <input
                         type="text"
-                        value={sourceVideo}
-                        onChange={(e) => setSourceVideo(e.target.value)}
-                        placeholder="gs://bucket/path/to/video.mp4"
-                        className="w-full px-3 py-2 border rounded-lg"
+                        value={videoSearch}
+                        onChange={(e) => setVideoSearch(e.target.value)}
+                        placeholder="搜索视频名称..."
+                        className="flex-1 px-2 py-1.5 border rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                        autoFocus
+                        onClick={(e) => e.stopPropagation()}
                       />
-                      <p className="text-xs text-gray-400 mt-1">直接输入 GCS 视频路径</p>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setVideoSortBy(videoSortBy === 'name' ? 'time' : 'name'); }}
+                        className={`px-2 py-1.5 rounded text-xs font-medium whitespace-nowrap border transition-colors ${videoSortBy === 'name' ? 'bg-indigo-50 text-indigo-700 border-indigo-300' : 'bg-amber-50 text-amber-700 border-amber-300'}`}
+                        title={videoSortBy === 'name' ? '当前：按名称排序，点击切换' : '当前：按上传时间排序，点击切换'}
+                      >
+                        {videoSortBy === 'name' ? '🔤 名称' : '🕐 时间'}
+                      </button>
                     </div>
-                  )}
-
-                  {/* 当前已选路径 */}
-                  {sourceVideo && sourceMode !== 'manual' && (
-                    <p className="text-xs text-gray-500 mt-2 truncate" title={sourceVideo}>
-                      已选: {sourceVideo}
-                    </p>
-                  )}
-                </div>
-                <div className="mt-3">
-                  <label className="block text-sm font-medium mb-2">剧集名称</label>
-                  <input
-                    type="text"
-                    value={dramaName}
-                    onChange={(e) => setDramaName(e.target.value)}
-                    placeholder="输入剧集名称"
-                    className="w-full px-3 py-2 border rounded-lg"
-                  />
-                </div>
+                    {/* 视频列表 */}
+                    <div className="overflow-y-auto flex-1">
+                      {(() => {
+                        const filtered = gcsVideos.filter(v => {
+                          if (!videoSearch.trim()) return true;
+                          const keyword = videoSearch.trim().toLowerCase();
+                          const name = (v.display_name || v.name || '').toLowerCase();
+                          const original = (v.original_filename || '').toLowerCase();
+                          return name.includes(keyword) || original.includes(keyword);
+                        });
+                        const sorted = [...filtered].sort((a, b) => {
+                          if (videoSortBy === 'time') {
+                            const ta = a.uploaded_at || a.created_at || '';
+                            const tb = b.uploaded_at || b.created_at || '';
+                            return tb.localeCompare(ta); // 最新在前
+                          }
+                          const na = (a.display_name || a.name || '').toLowerCase();
+                          const nb = (b.display_name || b.name || '').toLowerCase();
+                          return na.localeCompare(nb, 'zh-CN');
+                        });
+                        if (sorted.length === 0) {
+                          return <div className="px-3 py-4 text-sm text-gray-400 text-center">无匹配视频</div>;
+                        }
+                        return sorted.map((video, idx) => (
+                          <button
+                            key={video.video_id || idx}
+                            type="button"
+                            onClick={() => {
+                              setSourceVideo(video.gcs_path);
+                              setVideoDropdownOpen(false);
+                              setVideoSearch('');
+                            }}
+                            className={`w-full text-left px-3 py-2 text-sm hover:bg-indigo-50 transition-colors ${sourceVideo === video.gcs_path ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-700'}`}
+                          >
+                            {video.display_name || video.name}
+                            {video.display_name && video.original_filename && (
+                              <span className="text-gray-400 ml-1">({video.original_filename})</span>
+                            )}
+                          </button>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+                )}
               </div>
+              {sourceVideo && (
+                <div className="mt-2">
+                  {renamingVideoId ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={newDisplayName}
+                        onChange={(e) => setNewDisplayName(e.target.value)}
+                        className="flex-1 px-2 py-1 border rounded text-xs"
+                        maxLength={100}
+                        autoFocus
+                      />
+                      <button
+                        onClick={() => handleRename(renamingVideoId)}
+                        className="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 whitespace-nowrap"
+                      >
+                        确认
+                      </button>
+                      <button
+                        onClick={() => { setRenamingVideoId(null); setNewDisplayName(''); }}
+                        className="px-2 py-1 text-gray-500 hover:text-gray-700 text-xs whitespace-nowrap"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        const video = gcsVideos.find(v => v.gcs_path === sourceVideo);
+                        if (video && video.video_id) {
+                          setRenamingVideoId(video.video_id);
+                          setNewDisplayName(video.display_name || video.name);
+                        }
+                      }}
+                      className="text-xs text-blue-600 hover:text-blue-800"
+                    >
+                      ✏️ 重命名此视频
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
-          ) : (
+          )}
+
+          {/* 上传新视频（支持批量） */}
+          {sourceMode === 'upload' && (
+            <div className="mb-4">
+              <input ref={fileInputRef} type="file" accept="video/*" multiple onChange={handleFileSelect} className="hidden" />
+              <div
+                onClick={() => !uploading && fileInputRef.current?.click()}
+                className={`relative p-4 rounded-lg border-2 border-dashed transition-all cursor-pointer
+                  ${selectedFiles.length > 0
+                    ? 'border-green-400 bg-green-50/50 hover:border-green-500'
+                    : 'border-indigo-300 bg-indigo-50/30 hover:border-indigo-500 hover:bg-indigo-50/60'
+                  }
+                  ${uploading ? 'pointer-events-none opacity-70' : ''}
+                `}
+              >
+                {selectedFiles.length === 0 ? (
+                  <div className="text-center py-2">
+                    <div className="text-3xl mb-2 opacity-60">🎬</div>
+                    <p className="text-sm font-medium text-gray-700">点击选择视频文件（支持多选）</p>
+                    <p className="text-xs text-gray-400 mt-1">支持 MP4、MOV、AVI、MKV，可一次选择多个文件</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium text-gray-700">已选择 {selectedFiles.length} 个文件</span>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                          className="text-xs text-indigo-600 hover:text-indigo-800"
+                        >➕ 继续添加</button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setSelectedFiles([]); }}
+                          className="text-xs text-red-500 hover:text-red-700"
+                        >🗑️ 清空全部</button>
+                      </div>
+                    </div>
+                    <div className="max-h-40 overflow-y-auto space-y-1">
+                      {selectedFiles.map((file, idx) => (
+                        <div key={`${file.name}-${idx}`} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
+                          <span className="text-sm">🎥</span>
+                          <span className="text-sm text-gray-900 truncate flex-1">{file.name}</span>
+                          <span className="text-xs text-gray-400 flex-shrink-0">{(file.size / 1024 / 1024).toFixed(1)} MB</span>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSelectedFiles(prev => prev.filter((_, i) => i !== idx)); }}
+                            className="text-gray-400 hover:text-red-500 text-xs flex-shrink-0"
+                          >✕</button>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-xs text-gray-400">
+                      共 {(selectedFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(1)} MB
+                    </p>
+                  </div>
+                )}
+              </div>
+              {selectedFiles.length > 0 && (
+                <div className="mt-3">
+                  <button onClick={handleUpload} disabled={selectedFiles.length === 0 || uploading}
+                    className="w-full mt-2 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                  >
+                    {uploading ? `批量上传中 ${uploadProgress}%（${selectedFiles.length} 个文件）` : `📤 上传全部视频（${selectedFiles.length} 个）`}
+                  </button>
+                </div>
+              )}
+              {uploading && (
+                <div className="mt-2">
+                  <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                    <div className="bg-gradient-to-r from-indigo-500 to-purple-500 h-1.5 rounded-full transition-all" style={{ width: `${uploadProgress}%` }} />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 手动输入GCS路径 */}
+          {sourceMode === 'manual' && (
+            <div className="mb-4">
+              <input
+                type="text"
+                value={sourceVideo}
+                onChange={(e) => setSourceVideo(e.target.value)}
+                placeholder="gs://bucket/path/to/video.mp4"
+                className="w-full px-3 py-2 border rounded-lg"
+              />
+              <p className="text-xs text-gray-400 mt-1">直接输入 GCS 视频路径</p>
+            </div>
+          )}
+
+          {/* 文字描述生成模式 */}
+          {sourceMode === 'text' && (
             <div className="mb-4">
               <label className="block text-sm font-medium mb-2">视频描述</label>
               <textarea
@@ -811,18 +805,20 @@ export default function FissionPage() {
               <p className="text-xs text-gray-500 mt-1">
                 💡 详细描述视频场景、氛围、动作等，AI将根据描述生成视频
               </p>
-              <div className="mt-3">
-                <label className="block text-sm font-medium mb-2">剧集名称</label>
-                <input
-                  type="text"
-                  value={dramaName}
-                  onChange={(e) => setDramaName(e.target.value)}
-                  placeholder="输入剧集名称"
-                  className="w-full px-3 py-2 border rounded-lg"
-                />
-              </div>
             </div>
           )}
+
+          {/* 剧集名称（所有模式共用） */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium mb-2">剧集名称</label>
+            <input
+              type="text"
+              value={dramaName}
+              onChange={(e) => setDramaName(e.target.value)}
+              placeholder="输入剧集名称"
+              className="w-full px-3 py-2 border rounded-lg"
+            />
+          </div>
 
           <div className="mb-4">
             <label className="block text-sm font-medium mb-2">

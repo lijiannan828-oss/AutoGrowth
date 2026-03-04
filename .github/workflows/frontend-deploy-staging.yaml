@@ -5,6 +5,7 @@ on:
     branches:
       - staging
       - develop
+      - new
     paths:
       - 'frontend/**'
       - '.github/workflows/frontend-deploy-staging.yaml'
@@ -85,7 +86,7 @@ jobs:
           cat <<'FBEOF' > firebase.json
           {
             "hosting": {
-              "site": "fleet-blend-469520-n7",
+              "site": "auto-growth",
               "source": ".",
               "ignore": ["firebase-debug.log", "firebase-debug.*.log"]
             }

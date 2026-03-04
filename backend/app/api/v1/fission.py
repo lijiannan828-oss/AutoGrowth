@@ -379,6 +379,102 @@ async def upload_video(
 
 
 @router.post(
+    "/batch-upload",
+    summary="批量上传视频文件到GCS",
+)
+async def batch_upload_videos(
+    files: List[UploadFile] = File(...),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """批量上传视频文件到 GCS 并创建元数据，逐个处理并返回结果汇总"""
+    from google.cloud import storage
+    from app.core.config import settings
+    from app.services.video_metadata_service import VideoMetadataService
+
+    if not files:
+        raise HTTPException(status_code=400, detail="请至少上传一个文件")
+
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="单次最多上传 20 个文件")
+
+    storage_client = storage.Client()
+    bucket_name = settings.fission_upload_bucket or "vigloo-fission-uploads"
+    bucket = storage_client.bucket(bucket_name)
+    metadata_service = VideoMetadataService()
+
+    results = []
+    for file in files:
+        # 验证文件类型
+        if not file.content_type or not file.content_type.startswith("video/"):
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "error": f"不支持的文件类型: {file.content_type}",
+            })
+            continue
+
+        try:
+            file_ext = file.filename.split(".")[-1] if "." in file.filename else "mp4"
+            unique_filename = f"{uuid.uuid4()}.{file_ext}"
+            blob_name = f"{current_user.user_id}/{unique_filename}"
+            gcs_path = f"gs://{bucket_name}/{blob_name}"
+
+            content = await file.read()
+            content_type = file.content_type or "video/mp4"
+
+            blob = bucket.blob(blob_name)
+            blob.upload_from_string(content, content_type=content_type)
+
+            display_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
+
+            try:
+                video_id = metadata_service.create_video_metadata(
+                    user_id=current_user.user_id,
+                    gcs_path=gcs_path,
+                    gcs_bucket=bucket_name,
+                    gcs_blob_name=blob_name,
+                    display_name=display_name,
+                    original_filename=file.filename,
+                    file_size=len(content),
+                    content_type=content_type,
+                    file_extension=file_ext,
+                )
+            except Exception as e:
+                blob.delete()
+                results.append({
+                    "filename": file.filename,
+                    "success": False,
+                    "error": f"元数据创建失败: {str(e)}",
+                })
+                continue
+
+            results.append({
+                "filename": file.filename,
+                "success": True,
+                "video_id": video_id,
+                "display_name": display_name,
+                "gcs_path": gcs_path,
+                "size": len(content),
+            })
+        except Exception as e:
+            results.append({
+                "filename": file.filename,
+                "success": False,
+                "error": str(e),
+            })
+
+    success_count = sum(1 for r in results if r.get("success"))
+    fail_count = sum(1 for r in results if not r.get("success"))
+
+    return {
+        "total": len(results),
+        "success_count": success_count,
+        "fail_count": fail_count,
+        "results": results,
+    }
+
+
+@router.post(
     "/upload-url",
     summary="获取视频上传URL（GCS，需要网络）",
 )
