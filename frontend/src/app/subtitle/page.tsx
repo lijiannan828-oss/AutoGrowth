@@ -47,7 +47,7 @@ export default function SubtitlePage() {
   const [videoDropdownOpen, setVideoDropdownOpen] = useState(false);
   const [renamingVideoId, setRenamingVideoId] = useState<string | null>(null);
   const [newDisplayName, setNewDisplayName] = useState('');
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [videoDisplayName, setVideoDisplayName] = useState('');
@@ -102,58 +102,103 @@ export default function SubtitlePage() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // 文件选择（单文件）
+  // 文件选择（支持多文件）
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      setVideoDisplayName(file.name.replace(/\.[^/.]+$/, ""));
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const allowedExts = ['.mp4', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.webm', '.flv'];
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+
+    Array.from(files).forEach(file => {
+      const fileName = file.name.toLowerCase();
+      const isValid = file.type.startsWith('video/') || file.type.startsWith('audio/') ||
+        allowedExts.some(ext => fileName.endsWith(ext));
+      if (isValid) {
+        validFiles.push(file);
+      } else {
+        invalidFiles.push(file.name);
+      }
+    });
+
+    if (invalidFiles.length > 0) {
+      alert(`以下文件格式不支持，已跳过：\n${invalidFiles.join('\n')}`);
     }
+
+    if (validFiles.length > 0) {
+      setSelectedFiles(prev => [...prev, ...validFiles]);
+    }
+
+    // 重置 input，允许重复选择
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // 上传视频到 GCS
+  // 批量上传视频到 GCS（并行处理）
   const handleUpload = async () => {
-    if (!selectedFile) return;
-
-    // 检查重复文件
-    const existing = gcsVideos.find(v => v.original_filename === selectedFile.name);
-    if (existing) {
-      setSourceMode('select');
-      setSourceVideo(existing.gcs_path);
-      setSelectedFile(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      return;
-    }
+    if (selectedFiles.length === 0) return;
 
     setUploading(true);
     setUploadProgress(0);
-    try {
-      const res = await apiClient.post("/subtitle/upload", (() => {
+
+    const totalFiles = selectedFiles.length;
+    let completedCount = 0;
+
+    // 并行上传所有文件
+    const uploadPromises = selectedFiles.map(async (file) => {
+      // 检查重复文件
+      const existing = gcsVideos.find(v => v.original_filename === file.name);
+      if (existing) {
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFiles) * 100));
+        return { name: file.name, success: false as const, error: '文件已存在' };
+      }
+
+      try {
         const fd = new FormData();
-        fd.append("file", selectedFile);
-        if (videoDisplayName.trim()) fd.append("display_name", videoDisplayName.trim());
-        return fd;
-      })(), {
-        timeout: 300000,
-        onUploadProgress: (e: any) => {
-          const pct = Math.round((e.loaded * 90) / (e.total || 1));
-          setUploadProgress(Math.min(pct, 90));
-        },
-      });
-      const { gcs_path } = res.data;
-      setSourceVideo(gcs_path);
-      setUploadProgress(100);
-      setSelectedFile(null);
-      setVideoDisplayName('');
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      await loadGcsVideos();
-      setSourceMode('select');
-    } catch (error) {
-      console.error("上传失败:", error);
-      alert("上传失败，请重试");
-    } finally {
-      setUploading(false);
+        fd.append("file", file);
+        const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
+        fd.append("display_name", nameWithoutExt);
+
+        const res = await apiClient.post("/subtitle/upload", fd, {
+          timeout: 600000, // 单文件 10 分钟超时
+        });
+
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFiles) * 100));
+        return { name: file.name, success: true as const, gcs_path: res.data.gcs_path as string };
+      } catch (error: any) {
+        completedCount++;
+        setUploadProgress(Math.round((completedCount / totalFiles) * 100));
+        const errorMsg = error.response?.data?.detail || error.message || String(error);
+        return { name: file.name, success: false as const, error: errorMsg };
+      }
+    });
+
+    const results = await Promise.all(uploadPromises);
+
+    // 设置最后一个成功上传的视频路径
+    const lastSuccess = [...results].reverse().find(r => r.success && r.gcs_path);
+    if (lastSuccess && lastSuccess.success) {
+      setSourceVideo(lastSuccess.gcs_path!);
     }
+
+    await loadGcsVideos();
+
+    const successCount = results.filter(r => r.success).length;
+    const failCount = results.filter(r => !r.success).length;
+    if (failCount > 0) {
+      const failDetails = results.filter(r => !r.success).map(r => `${r.name}: ${r.error}`).join('\n');
+      alert(`上传完成！成功 ${successCount} 个，失败 ${failCount} 个\n\n失败详情：\n${failDetails}`);
+    } else {
+      alert(`全部上传成功！共 ${successCount} 个文件`);
+    }
+
+    setSelectedFiles([]);
+    setVideoDisplayName('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    setUploading(false);
+    if (successCount > 0) setSourceMode('select');
   };
 
   // 重命名视频
@@ -389,42 +434,61 @@ export default function SubtitlePage() {
               </div>
             )}
 
-            {/* 上传新视频 */}
+            {/* 上传新视频（支持批量） */}
             {sourceMode === 'upload' && (
               <div>
-                <input ref={fileInputRef} type="file" accept=".mp4,.mov,.avi,.mkv,.mp3,.wav,.webm,.flv" onChange={handleFileSelect} className="hidden" />
+                <input ref={fileInputRef} type="file" accept=".mp4,.mov,.avi,.mkv,.mp3,.wav,.webm,.flv" multiple onChange={handleFileSelect} className="hidden" />
                 <div
                   onClick={() => !uploading && fileInputRef.current?.click()}
                   className={`relative p-4 rounded-lg border-2 border-dashed transition-all cursor-pointer
-                    ${selectedFile ? 'border-green-400 bg-green-50/50 hover:border-green-500' : 'border-indigo-300 bg-indigo-50/30 hover:border-indigo-500 hover:bg-indigo-50/60'}
+                    ${selectedFiles.length > 0 ? 'border-green-400 bg-green-50/50 hover:border-green-500' : 'border-indigo-300 bg-indigo-50/30 hover:border-indigo-500 hover:bg-indigo-50/60'}
                     ${uploading ? 'pointer-events-none opacity-70' : ''}`}
                 >
-                  {!selectedFile ? (
+                  {selectedFiles.length === 0 ? (
                     <div className="text-center py-2">
                       <div className="text-3xl mb-2 opacity-60">🎬</div>
-                      <p className="text-sm font-medium text-gray-700">点击选择视频/音频文件</p>
-                      <p className="text-xs text-gray-400 mt-1">支持 MP4、MOV、AVI、MKV、MP3、WAV</p>
+                      <p className="text-sm font-medium text-gray-700">点击选择视频/音频文件（支持多选）</p>
+                      <p className="text-xs text-gray-400 mt-1">支持 MP4、MOV、AVI、MKV、MP3、WAV，可一次选择多个文件</p>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-3">
-                      <div className="flex-shrink-0 w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center text-xl">🎥</div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">{selectedFile.name}</p>
-                        <p className="text-xs text-gray-500">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-sm font-medium text-gray-700">已选择 {selectedFiles.length} 个文件</span>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); fileInputRef.current?.click(); }}
+                            className="text-xs text-indigo-600 hover:text-indigo-800"
+                          >➕ 继续添加</button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setSelectedFiles([]); }}
+                            className="text-xs text-red-500 hover:text-red-700"
+                          >🗑️ 清空全部</button>
+                        </div>
                       </div>
-                      <button onClick={(e) => { e.stopPropagation(); setSelectedFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
-                        className="flex-shrink-0 text-gray-400 hover:text-red-500 transition-colors" title="移除文件">✕</button>
+                      <div className="max-h-40 overflow-y-auto space-y-1">
+                        {selectedFiles.map((file, idx) => (
+                          <div key={`${file.name}-${idx}`} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
+                            <span className="text-sm">🎥</span>
+                            <span className="text-sm text-gray-900 truncate flex-1">{file.name}</span>
+                            <span className="text-xs text-gray-400 flex-shrink-0">{(file.size / 1024 / 1024).toFixed(1)} MB</span>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setSelectedFiles(prev => prev.filter((_, i) => i !== idx)); }}
+                              className="text-gray-400 hover:text-red-500 text-xs flex-shrink-0"
+                            >✕</button>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-400">
+                        共 {(selectedFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(1)} MB
+                      </p>
                     </div>
                   )}
                 </div>
-                {selectedFile && (
+                {selectedFiles.length > 0 && (
                   <div className="mt-3">
-                    <label className="block text-xs font-medium text-gray-700 mb-1">视频显示名称</label>
-                    <input type="text" value={videoDisplayName} onChange={(e) => setVideoDisplayName(e.target.value)}
-                      placeholder="输入视频名称（可选）" className="w-full px-3 py-1.5 border rounded-lg text-sm" maxLength={100} />
-                    <button onClick={handleUpload} disabled={!selectedFile || uploading}
+                    <button onClick={handleUpload} disabled={selectedFiles.length === 0 || uploading}
                       className="w-full mt-2 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
-                      {uploading ? `上传中 ${uploadProgress}%` : '📤 上传视频'}
+                      {uploading ? `批量上传中 ${uploadProgress}%（${selectedFiles.length} 个文件）` : `📤 上传全部文件（${selectedFiles.length} 个）`}
                     </button>
                   </div>
                 )}

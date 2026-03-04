@@ -29,7 +29,7 @@ const normalizeBaseUrl = (input: string): string => {
 const apiClient = axios.create({
   baseURL: normalizeBaseUrl(process.env.NEXT_PUBLIC_API_URL ?? DEFAULT_API_BASE_URL),
   withCredentials: true,
-  timeout: 30000, // 30秒超时，因为 Google Sheets 读取可能需要较长时间
+  timeout: 300000, // 5分钟超时，支持大文件上传
 });
 
 export const getStoredToken = (): string | null => {
