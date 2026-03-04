@@ -897,6 +897,171 @@ async def rename_tts_source_file(file_id: str, payload: dict):
     }
 
 
+@router.get("/preview/{voice_id}")
+async def preview_voice(voice_id: str):
+    """音色试听（固定示例文本）"""
+    try:
+        import edge_tts
+
+        sample_text = "你好，这是语音试听示例。"
+        rate_str = "+0%"
+
+        communicate = edge_tts.Communicate(
+            text=sample_text,
+            voice=voice_id,
+            rate=rate_str,
+            pitch="+0Hz",
+            volume="+0%",
+        )
+
+        audio_data = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.extend(chunk["data"])
+
+        # 临时上传到 GCS
+        preview_id = str(uuid.uuid4())
+        blob_name = f"vigloo-tts-uploads/preview/{preview_id}.mp3"
+        upload_bytes(blob_name, bytes(audio_data), "audio/mpeg", bucket_name=settings.tts_bucket)
+
+        # 生成签名 URL（1小时有效）
+        preview_url = generate_download_signed_url(
+            blob_name=blob_name,
+            download_filename=f"preview_{voice_id}.mp3",
+            content_type="audio/mpeg",
+            bucket_name=settings.tts_bucket,
+        )
+
+        return {"preview_url": preview_url}
+    except Exception as e:
+        logger.error(f"音色试听失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/preview-custom")
+async def preview_custom(
+    voice_id: str = Form(...),
+    rate: float = Form(1.0),
+    pitch: str = Form("+0Hz"),
+    volume: str = Form("+0%"),
+    text: str = Form(None),
+    file_id: str = Form(None),
+    gcs_path: str = Form(None),
+):
+    """自定义试听（用户文本 + 音色配置）"""
+    try:
+        import edge_tts
+
+        # 获取文本
+        actual_text = ""
+        if text and text.strip():
+            actual_text = text.strip()[:200]  # 限制200字
+        elif file_id:
+            _load_all_tts_files()
+            meta = _tts_files.get(file_id)
+            if meta:
+                blob_name = meta["gcs_blob_name"]
+                bucket, _ = get_bucket(settings.tts_bucket)
+                blob = bucket.blob(blob_name)
+                content = blob.download_as_bytes()
+                ext = meta.get("file_extension", ".txt").lower()
+                if ext == ".txt":
+                    actual_text = content.decode("utf-8")[:200]
+                elif ext == ".docx":
+                    actual_text = _extract_docx_text(content)[:200]
+        elif gcs_path:
+            path = gcs_path.replace("gs://", "")
+            bucket_name_part = path.split("/", 1)[0]
+            blob_name = path.split("/", 1)[1] if "/" in path else ""
+            bucket, _ = get_bucket(bucket_name_part)
+            blob = bucket.blob(blob_name)
+            content = blob.download_as_bytes()
+            actual_text = content.decode("utf-8")[:200]
+
+        if not actual_text:
+            actual_text = "你好，这是语音试听示例。"
+
+        rate_str = f"+{int((rate - 1) * 100)}%" if rate >= 1 else f"{int((rate - 1) * 100)}%"
+
+        communicate = edge_tts.Communicate(
+            text=actual_text,
+            voice=voice_id,
+            rate=rate_str,
+            pitch=pitch,
+            volume=volume,
+        )
+
+        audio_data = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data.extend(chunk["data"])
+
+        preview_id = str(uuid.uuid4())
+        blob_name = f"vigloo-tts-uploads/preview/{preview_id}.mp3"
+        upload_bytes(blob_name, bytes(audio_data), "audio/mpeg", bucket_name=settings.tts_bucket)
+
+        preview_url = generate_download_signed_url(
+            blob_name=blob_name,
+            download_filename=f"preview.mp3",
+            content_type="audio/mpeg",
+            bucket_name=settings.tts_bucket,
+        )
+
+        return {"preview_url": preview_url}
+    except Exception as e:
+        logger.error(f"自定义试听失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/preview-dialogue-custom")
+async def preview_dialogue_custom(req: DialogueRequest):
+    """多角色对话试听"""
+    try:
+        from pydub import AudioSegment
+
+        segments = _parse_dialogue_text(req.text)
+        if not segments:
+            raise HTTPException(status_code=400, detail="未解析到对话内容")
+
+        # 只取前3段试听
+        preview_segments = segments[:3]
+
+        silence = AudioSegment.silent(duration=req.silence_gap)
+        combined = AudioSegment.empty()
+
+        for seg in preview_segments:
+            role = seg["role"]
+            cfg = req.role_voices.get(role)
+            if not cfg:
+                continue
+
+            audio_bytes = await _generate_segment_audio(
+                seg["text"], cfg.voice_id, cfg.rate, cfg.pitch, cfg.volume
+            )
+            seg_audio = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
+            combined += seg_audio + silence
+
+        buf = io.BytesIO()
+        combined.export(buf, format="mp3")
+        buf.seek(0)
+
+        preview_id = str(uuid.uuid4())
+        blob_name = f"vigloo-tts-uploads/preview/{preview_id}.mp3"
+        upload_bytes(blob_name, buf.read(), "audio/mpeg", bucket_name=settings.tts_bucket)
+
+        preview_url = generate_download_signed_url(
+            blob_name=blob_name,
+            download_filename=f"dialogue_preview.mp3",
+            content_type="audio/mpeg",
+            bucket_name=settings.tts_bucket,
+        )
+
+        return {"preview_url": preview_url}
+    except Exception as e:
+        logger.error(f"对话试听失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/convert-from-file")
 async def convert_from_gcs_file(
     background_tasks: BackgroundTasks,
